@@ -1,0 +1,26 @@
+{
+  "name": "wish-kaleb-one",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:worker": "wrangler dev",
+    "build": "vite build",
+    "build:worker": "wrangler deploy --dry-run",
+    "preview": "vite preview",
+    "deploy": "wrangler pages deploy ./dist",
+    "deploy:worker": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.4.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@hono/node-dev": "^1.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "vite": "^5.4.0",
+    "wrangler": "^3.80.0"
+  }
+}
