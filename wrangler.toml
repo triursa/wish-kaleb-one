@@ -12,4 +12,4 @@ GITHUB_VAULT_BRANCH = "master"
 [[d1_databases]]
 binding = "DB"
 database_name = "wish-kaleb-one-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "0c82412b-b9a4-4a33-9bbf-cb4738c6ce4f"
