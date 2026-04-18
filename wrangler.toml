@@ -4,7 +4,6 @@ pages_build_output_dir = "./dist"
 
 [vars]
 ALLOWED_EMAILS = "melindajean16@gmail.com,kaleb.bays@gmail.com"
-GOOGLE_CLIENT_ID = "1053206379658-7ov655q7g7r8mjbt2uto2iuaafuebkel.apps.googleusercontent.com"
 GITHUB_VAULT_REPO = "triursa/second-brain-vault"
 GITHUB_VAULT_PATH = "domains/wishlist/BACKLOG.md"
 GITHUB_VAULT_BRANCH = "master"
