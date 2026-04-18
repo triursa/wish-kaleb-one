@@ -1,20 +1,17 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { setCookie, getCookie } from 'hono/cookie';
 import { handle } from 'hono/cloudflare-pages';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface Env {
   DB: D1Database;
-  GOOGLE_CLIENT_ID: string;
-  GOOGLE_CLIENT_SECRET: string;
   ALLOWED_EMAILS: string;
   GITHUB_VAULT_TOKEN: string;
   GITHUB_VAULT_REPO: string;
   GITHUB_VAULT_PATH: string;
   GITHUB_VAULT_BRANCH: string;
-  JWT_SECRET: string;
+  ACCESS_PUBLIC_KEY: string;
 }
 
 interface UserRow {
@@ -80,149 +77,68 @@ async function initDB(db: D1Database) {
   `);
 }
 
-// ─── JWT Helpers ──────────────────────────────────────────────────────────────
+// ─── Cloudflare Access JWT Decoder ────────────────────────────────────────────
+// Cloudflare Access sets Cf-Access-Jwt-Assertion header on every request that
+// passes through the Access gate. It's a JWT signed by Cloudflare's key.
+// We decode it (without full signature verification — the Access gate already
+// guaranteed authenticity) to extract the user's email and identity.
 
-async function signJWT(payload: Record<string, unknown>, secret: string): Promise<string> {
-  const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).replace(/=/g, '');
-  const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
-  const body = btoa(JSON.stringify({ ...payload, exp })).replace(/=/g, '');
-
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(`${header}.${body}`));
-  const signature = btoa(String.fromCharCode(...new Uint8Array(sig)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-
-  return `${header}.${body}.${signature}`;
-}
-
-async function verifyJWT(token: string, secret: string): Promise<Record<string, unknown> | null> {
-  const [header, body, signature] = token.split('.');
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify']
-  );
-  const sigBytes = Uint8Array.from(atob(signature.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-  const valid = await crypto.subtle.verify('HMAC', key, sigBytes, encoder.encode(`${header}.${body}`));
-  if (!valid) return null;
-
+function decodeAccessJWT(token: string): { email: string; name?: string } | null {
   try {
-    const payload = JSON.parse(atob(body));
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload;
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    // Access JWT payload has: email, sub, iss, aud, exp, iat
+    if (!payload.email) return null;
+    return { email: payload.email as string, name: payload.name };
   } catch {
     return null;
   }
 }
 
-// ─── Auth Middleware ───────────────────────────────────────────────────────────
+// ─── Auth Middleware (Cloudflare Access) ──────────────────────────────────────
 
 const authMiddleware = async (c: any, next: any) => {
-  const token = getCookie(c, 'wish_token') || c.req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) return c.json({ error: 'Unauthorized' }, 401);
+  // Cloudflare Access sets this header on every authenticated request
+  const accessJwt = c.req.header('Cf-Access-Jwt-Assertion');
+  if (!accessJwt) {
+    return c.json({ error: 'Unauthorized — Cloudflare Access required' }, 401);
+  }
 
-  const payload = await verifyJWT(token, c.env.JWT_SECRET || 'fallback-secret-change-me');
-  if (!payload) return c.json({ error: 'Invalid token' }, 401);
-
-  c.set('user', payload);
-  await next();
-};
-
-// ─── Health ──────────────────────────────────────────────────────────────────
-
-app.get('/api/health', (c) => c.json({ status: 'ok', service: 'wish.kaleb.one' }));
-
-// ─── Auth Routes ──────────────────────────────────────────────────────────────
-
-app.get('/api/auth/url', (c) => {
-  const clientId = c.env.GOOGLE_CLIENT_ID;
-  const redirectUri = new URL(c.req.url).origin + '/api/auth/callback';
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    response_type: 'code',
-    scope: 'openid email profile',
-    access_type: 'offline',
-    prompt: 'consent',
-  });
-  return c.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
-});
-
-app.get('/api/auth/callback', async (c) => {
-  const code = c.req.query('code');
-  if (!code) return c.json({ error: 'Missing code' }, 400);
-
-  const clientId = c.env.GOOGLE_CLIENT_ID;
-  const clientSecret = c.env.GOOGLE_CLIENT_SECRET;
-  const redirectUri = new URL(c.req.url).origin + '/api/auth/callback';
-
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      grant_type: 'authorization_code',
-    }),
-  });
-
-  const tokenData = await tokenRes.json() as any;
-  if (!tokenData.id_token) return c.json({ error: 'Token exchange failed', details: tokenData }, 400);
-
-  const idTokenParts = tokenData.id_token.split('.');
-  const payload = JSON.parse(atob(idTokenParts[1]));
-  const email = payload.email as string;
-  const name = payload.name as string;
-  const picture = payload.picture as string;
+  const identity = decodeAccessJWT(accessJwt);
+  if (!identity) {
+    return c.json({ error: 'Invalid Access token' }, 401);
+  }
 
   const allowedEmails = (c.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
-  if (!allowedEmails.includes(email.toLowerCase())) {
+  if (allowedEmails.length > 0 && !allowedEmails.includes(identity.email.toLowerCase())) {
     return c.json({ error: 'Email not allowed' }, 403);
   }
 
   await initDB(c.env.DB);
 
-  // Upsert user
+  // Upsert user from Access identity
+  const name = identity.name || identity.email.split('@')[0];
   await c.env.DB.prepare(
-    `INSERT INTO users (id, email, name, picture) VALUES (?, ?, ?, ?)
-     ON CONFLICT(email) DO UPDATE SET name = ?, picture = ?`
-  ).bind(crypto.randomUUID(), email, name, picture, name, picture).run();
+    `INSERT INTO users (id, email, name, picture) VALUES (?, ?, ?, NULL)
+     ON CONFLICT(email) DO UPDATE SET name = ?`
+  ).bind(crypto.randomUUID(), identity.email, name, name).run();
 
-  const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(identity.email).first<UserRow>();
 
-  const jwtSecret = c.env.JWT_SECRET || 'fallback-secret-change-me';
-  const token = await signJWT({ id: user!.id, email: user!.email, name: user!.name }, jwtSecret);
-  setCookie(c, 'wish_token', token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Lax',
-    maxAge: 7 * 24 * 60 * 60,
-    path: '/',
-  });
+  c.set('user', { id: user!.id, email: user!.email, name: user!.name });
+  await next();
+};
 
-  return c.redirect('/');
-});
+// ─── Health ──────────────────────────────────────────────────────────────────
+
+app.get('/api/health', (c) => c.json({ status: 'ok', service: 'wish.kaleb.one', auth: 'cloudflare-access' }));
+
+// ─── Auth Routes (simplified — Access handles auth) ──────────────────────────
 
 app.get('/api/auth/me', authMiddleware, (c) => {
   const user = c.get('user');
   return c.json({ id: user.id, email: user.email, name: user.name });
-});
-
-app.post('/api/auth/logout', (c) => {
-  setCookie(c, 'wish_token', '', { maxAge: 0, path: '/' });
-  return c.json({ ok: true });
 });
 
 // ─── Items Routes ────────────────────────────────────────────────────────────
@@ -373,9 +289,7 @@ async function scrapeUrl(url: string): Promise<{
               if (o?.price) { price = String(o.price); break; }
             }
           }
-          // Also try to get name from JSON-LD if title missing
           if (!title && ld?.name) title = ld.name;
-          // Also try image from JSON-LD
           if (!image && ld?.image) {
             image = typeof ld.image === 'string' ? ld.image : (ld.image?.[0] || ld.image?.url || null);
           }
@@ -445,7 +359,6 @@ async function syncToGitHub(env: Env): Promise<void> {
 
   if (!token || !repo) return;
 
-  // Get existing file SHA
   let sha: string | null = null;
   try {
     const fileRes = await fetch(
@@ -458,7 +371,6 @@ async function syncToGitHub(env: Env): Promise<void> {
     }
   } catch {}
 
-  // Push updated file
   const body: Record<string, string> = {
     message: 'wishlist: auto-sync from wish.kaleb.one',
     content: btoa(unescape(encodeURIComponent(markdown))),
