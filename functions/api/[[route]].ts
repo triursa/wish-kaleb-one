@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { setCookie, getCookie } from 'hono/cookie';
+import { handle } from 'hono/cloudflare-pages';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ app.use('/api/*', cors({
   credentials: true,
 }));
 
-// ─── D1 Schema Initialization ───────────────────────────────────────────────
+// ─── D1 Schema Initialization ────────────────────────────────────────────────
 
 async function initDB(db: D1Database) {
   await db.exec(`
@@ -79,11 +80,11 @@ async function initDB(db: D1Database) {
   `);
 }
 
-// ─── JWT Helpers ─────────────────────────────────────────────────────────────
+// ─── JWT Helpers ──────────────────────────────────────────────────────────────
 
 async function signJWT(payload: Record<string, unknown>, secret: string): Promise<string> {
   const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).replace(/=/g, '');
-  const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60; // 7 days
+  const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
   const body = btoa(JSON.stringify({ ...payload, exp })).replace(/=/g, '');
 
   const encoder = new TextEncoder();
@@ -111,9 +112,8 @@ async function verifyJWT(token: string, secret: string): Promise<Record<string, 
     false,
     ['verify']
   );
-  const sigInput = `${header}.${body}`;
   const sigBytes = Uint8Array.from(atob(signature.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-  const valid = await crypto.subtle.verify('HMAC', key, sigBytes, encoder.encode(sigInput));
+  const valid = await crypto.subtle.verify('HMAC', key, sigBytes, encoder.encode(`${header}.${body}`));
   if (!valid) return null;
 
   try {
@@ -125,13 +125,13 @@ async function verifyJWT(token: string, secret: string): Promise<Record<string, 
   }
 }
 
-// ─── Auth Middleware ──────────────────────────────────────────────────────────
+// ─── Auth Middleware ───────────────────────────────────────────────────────────
 
 const authMiddleware = async (c: any, next: any) => {
   const token = getCookie(c, 'wish_token') || c.req.header('Authorization')?.replace('Bearer ', '');
   if (!token) return c.json({ error: 'Unauthorized' }, 401);
 
-  const payload = await verifyJWT(token, c.env.JWT_SECRET || 'fallback-secret');
+  const payload = await verifyJWT(token, c.env.JWT_SECRET || 'fallback-secret-change-me');
   if (!payload) return c.json({ error: 'Invalid token' }, 401);
 
   c.set('user', payload);
@@ -142,11 +142,11 @@ const authMiddleware = async (c: any, next: any) => {
 
 app.get('/api/health', (c) => c.json({ status: 'ok', service: 'wish.kaleb.one' }));
 
-// ─── Auth Routes ─────────────────────────────────────────────────────────────
+// ─── Auth Routes ──────────────────────────────────────────────────────────────
 
 app.get('/api/auth/url', (c) => {
   const clientId = c.env.GOOGLE_CLIENT_ID;
-  const redirectUri = new URL('/api/auth/callback', c.req.url).origin + '/api/auth/callback';
+  const redirectUri = new URL(c.req.url).origin + '/api/auth/callback';
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
@@ -166,10 +166,9 @@ app.get('/api/auth/callback', async (c) => {
   const clientSecret = c.env.GOOGLE_CLIENT_SECRET;
   const redirectUri = new URL(c.req.url).origin + '/api/auth/callback';
 
-  // Exchange code for tokens
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': ' ' },
     body: new URLSearchParams({
       code,
       client_id: clientId,
@@ -179,17 +178,15 @@ app.get('/api/auth/callback', async (c) => {
     }),
   });
 
-  const tokenData = await tokenRes.json();
-  if (!tokenData.id_token) return c.json({ error: 'Token exchange failed' }, 400);
+  const tokenData = await tokenRes.json() as any;
+  if (!tokenData.id_token) return c.json({ error: 'Token exchange failed', details: tokenData }, 400);
 
-  // Decode id_token to get user info
   const idTokenParts = tokenData.id_token.split('.');
   const payload = JSON.parse(atob(idTokenParts[1]));
   const email = payload.email as string;
   const name = payload.name as string;
   const picture = payload.picture as string;
 
-  // Check allowed emails
   const allowedEmails = (c.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
   if (!allowedEmails.includes(email.toLowerCase())) {
     return c.json({ error: 'Email not allowed' }, 403);
@@ -197,20 +194,16 @@ app.get('/api/auth/callback', async (c) => {
 
   await initDB(c.env.DB);
 
-  // Create or update user
-  const userId = crypto.randomUUID();
+  // Upsert user
   await c.env.DB.prepare(
     `INSERT INTO users (id, email, name, picture) VALUES (?, ?, ?, ?)
      ON CONFLICT(email) DO UPDATE SET name = ?, picture = ?`
-  ).bind(userId, email, name, picture, name, picture).run();
+  ).bind(crypto.randomUUID(), email, name, picture, name, picture).run();
 
-  // Fetch the user (may have been updated)
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
 
-  // Sign JWT
-  const jwtSecret = c.env.JWT_SECRET || 'fallback-secret';
+  const jwtSecret = c.env.JWT_SECRET || 'fallback-secret-change-me';
   const token = await signJWT({ id: user!.id, email: user!.email, name: user!.name }, jwtSecret);
-
   setCookie(c, 'wish_token', token, {
     httpOnly: true,
     secure: true,
@@ -236,7 +229,6 @@ app.post('/api/auth/logout', (c) => {
 
 app.get('/api/items', authMiddleware, async (c) => {
   await initDB(c.env.DB);
-
   const items = await c.env.DB.prepare(`
     SELECT i.*, u.name as user_name, u.email as user_email
     FROM items i
@@ -244,7 +236,6 @@ app.get('/api/items', authMiddleware, async (c) => {
     WHERE i.deleted_at IS NULL
     ORDER BY i.created_at DESC
   `).all<ItemRow>();
-
   return c.json(items.results);
 });
 
@@ -254,10 +245,8 @@ app.post('/api/items', authMiddleware, async (c) => {
   const { url, notes } = body;
 
   if (!url) return c.json({ error: 'URL is required' }, 400);
-
   await initDB(c.env.DB);
 
-  // Scrape metadata
   const meta = await scrapeUrl(url);
 
   const id = crypto.randomUUID();
@@ -265,19 +254,13 @@ app.post('/api/items', authMiddleware, async (c) => {
     INSERT INTO items (id, url, title, price, image_url, store_name, notes, added_by)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    id,
-    url,
-    meta.title || url,
-    meta.price || null,
-    meta.image || null,
-    meta.store || null,
-    notes || null,
-    user.id
+    id, url, meta.title || url, meta.price || null, meta.image || null,
+    meta.store || null, notes || null, user.id
   ).run();
 
   const item = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
 
-  // Trigger GitHub sync in background (fire and forget)
+  // Fire-and-forget GitHub sync
   syncToGitHub(c.env).catch(() => {});
 
   return c.json(item, 201);
@@ -286,7 +269,6 @@ app.post('/api/items', authMiddleware, async (c) => {
 app.patch('/api/items/:id', authMiddleware, async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json();
-  const user = c.get('user');
 
   await initDB(c.env.DB);
 
@@ -297,7 +279,7 @@ app.patch('/api/items/:id', authMiddleware, async (c) => {
     updates.push('purchased = ?');
     values.push(body.purchased ? 1 : 0);
     if (body.purchased) {
-      updates.push('purchased_at = datetime("now")');
+      updates.push("purchased_at = datetime('now')");
     } else {
       updates.push('purchased_at = NULL');
     }
@@ -312,7 +294,6 @@ app.patch('/api/items/:id', authMiddleware, async (c) => {
   values.push(id);
   await c.env.DB.prepare(`UPDATE items SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
 
-  // Sync to GitHub
   syncToGitHub(c.env).catch(() => {});
 
   const item = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
@@ -321,13 +302,9 @@ app.patch('/api/items/:id', authMiddleware, async (c) => {
 
 app.delete('/api/items/:id', authMiddleware, async (c) => {
   const id = c.req.param('id');
-
   await initDB(c.env.DB);
-  await c.env.DB.prepare('UPDATE items SET deleted_at = datetime("now") WHERE id = ?').bind(id).run();
-
-  // Sync to GitHub
+  await c.env.DB.prepare("UPDATE items SET deleted_at = datetime('now') WHERE id = ?").bind(id).run();
   syncToGitHub(c.env).catch(() => {});
-
   return c.json({ ok: true });
 });
 
@@ -343,7 +320,7 @@ app.post('/api/sync', authMiddleware, async (c) => {
   }
 });
 
-// ─── Scraper ─────────────────────────────────────────────────────────────────
+// ─── Scraper ──────────────────────────────────────────────────────────────────
 
 async function scrapeUrl(url: string): Promise<{
   title: string | null;
@@ -364,38 +341,18 @@ async function scrapeUrl(url: string): Promise<{
     let image: string | null = null;
     let store: string | null = null;
 
-    // Extract og: tags
-    const ogTitleMatch = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
-    if (!ogTitleMatch) {
-      const ogTitleMatch2 = html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i);
-      title = ogTitleMatch2?.[1] || null;
-    } else {
-      title = ogTitleMatch[1];
-    }
+    // og: tags (either order of property/content)
+    const ogTags: Record<string, string> = {};
+    const ogRegex = /<meta[^>]+(?:property|name)=["']og:([^"']+)["'][^>]+(?:content|value)=["']([^"']+)["'][^>]*>/gi;
+    const ogRegex2 = /<meta[^>]+(?:content|value)=["']([^"']+)["'][^>]+(?:property|name)=["']og:([^"']+)["'][^>]*>/gi;
+    let m;
+    while ((m = ogRegex.exec(html)) !== null) ogTags[m[1]] = m[2];
+    while ((m = ogRegex2.exec(html)) !== null) ogTags[m[2]] = m[1];
 
-    const ogImageMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
-    if (!ogImageMatch) {
-      const ogImageMatch2 = html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
-      image = ogImageMatch2?.[1] || null;
-    } else {
-      image = ogImageMatch[1];
-    }
-
-    const ogPriceMatch = html.match(/<meta[^>]+property=["']og:price:amount["'][^>]+content=["']([^"']+)["']/i);
-    if (!ogPriceMatch) {
-      const ogPriceMatch2 = html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:price:amount["']/i);
-      price = ogPriceMatch2?.[1] || null;
-    } else {
-      price = ogPriceMatch[1];
-    }
-
-    const ogSiteMatch = html.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i);
-    if (!ogSiteMatch) {
-      const ogSiteMatch2 = html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:site_name["']/i);
-      store = ogSiteMatch2?.[1] || null;
-    } else {
-      store = ogSiteMatch[1];
-    }
+    title = ogTags['title'] || null;
+    image = ogTags['image'] || null;
+    price = ogTags['price:amount'] || null;
+    store = ogTags['site_name'] || null;
 
     // Fallback to <title>
     if (!title) {
@@ -410,28 +367,45 @@ async function scrapeUrl(url: string): Promise<{
         try {
           const ld = JSON.parse(match[1]);
           const offers = ld?.offers;
-          if (offers?.price) {
-            price = String(offers.price);
-            break;
-          }
-          // Check array of offers
+          if (offers?.price) { price = String(offers.price); break; }
           if (Array.isArray(offers)) {
             for (const o of offers) {
-              if (o?.price) {
-                price = String(o.price);
-                break;
-              }
+              if (o?.price) { price = String(o.price); break; }
             }
+          }
+          // Also try to get name from JSON-LD if title missing
+          if (!title && ld?.name) title = ld.name;
+          // Also try image from JSON-LD
+          if (!image && ld?.image) {
+            image = typeof ld.image === 'string' ? ld.image : (ld.image?.[0] || ld.image?.url || null);
           }
         } catch {}
       }
     }
 
+    // Make relative image URLs absolute
+    if (image && !image.startsWith('http')) {
+      try {
+        image = new URL(image, url).href;
+      } catch {}
+    }
+
     // Fallback: derive store from hostname
     if (!store) {
-      try {
-        store = new URL(url).hostname.replace(/^www\./, '');
-      } catch {}
+      try { store = new URL(url).hostname.replace(/^www\./, ''); } catch {}
+    }
+
+    // Clean up store names
+    const storeNames: Record<string, string> = {
+      'etsy.com': 'Etsy',
+      'amazon.com': 'Amazon',
+      'freepeople.com': 'Free People',
+      'adornmonde.com': 'Adorn',
+      'madebymary.com': 'Made by Mary',
+      'gldn.com': 'GLDN',
+    };
+    for (const [domain, name] of Object.entries(storeNames)) {
+      if (store?.includes(domain)) { store = name; break; }
     }
 
     return { title, price, image, store };
@@ -440,7 +414,7 @@ async function scrapeUrl(url: string): Promise<{
   }
 }
 
-// ─── GitHub Vault Sync ──────────────────────────────────────────────────────
+// ─── GitHub Vault Sync ────────────────────────────────────────────────────────
 
 async function syncToGitHub(env: Env): Promise<void> {
   const items = await env.DB.prepare(`
@@ -452,13 +426,16 @@ async function syncToGitHub(env: Env): Promise<void> {
   `).all<ItemRow>();
 
   let markdown = '# Wishlist\n\n';
+  markdown += '| Status | Item | Price | Store | Notes | Added |\n';
+  markdown += '|--------|------|-------|-------|-------|-------|\n';
 
   for (const item of items.results) {
     const status = item.purchased ? '✅' : '🎁';
-    const priceStr = item.price ? ` — $${item.price}` : '';
-    const storeStr = item.store_name ? ` at ${item.store_name}` : '';
-    markdown += `- ${status} [${item.title}](${item.url})${priceStr}${storeStr}\n`;
-    if (item.notes) markdown += `  > ${item.notes}\n`;
+    const priceStr = item.price ? `$${item.price}` : '—';
+    const titleLink = `[${item.title}](${item.url})`;
+    const notes = item.notes || '—';
+    const date = new Date(item.created_at).toLocaleDateString();
+    markdown += `| ${status} | ${titleLink} | ${priceStr} | ${item.store_name || '—'} | ${notes} | ${date} |\n`;
   }
 
   const repo = env.GITHUB_VAULT_REPO;
@@ -468,7 +445,7 @@ async function syncToGitHub(env: Env): Promise<void> {
 
   if (!token || !repo) return;
 
-  // Get existing file SHA (if any)
+  // Get existing file SHA
   let sha: string | null = null;
   try {
     const fileRes = await fetch(
@@ -476,7 +453,7 @@ async function syncToGitHub(env: Env): Promise<void> {
       { headers: { Authorization: `token ${token}`, 'User-Agent': 'wish-kaleb-one' } }
     );
     if (fileRes.ok) {
-      const fileData = await fileRes.json();
+      const fileData = await fileRes.json() as any;
       sha = fileData.sha;
     }
   } catch {}
@@ -484,7 +461,7 @@ async function syncToGitHub(env: Env): Promise<void> {
   // Push updated file
   const body: Record<string, string> = {
     message: 'wishlist: auto-sync from wish.kaleb.one',
-    content: btoa(markdown),
+    content: btoa(unescape(encodeURIComponent(markdown))),
     branch,
   };
   if (sha) body.sha = sha;
@@ -500,7 +477,6 @@ async function syncToGitHub(env: Env): Promise<void> {
   });
 }
 
-// ─── Catch-all for SPA ──────────────────────────────────────────────────────
+// ─── Export for Cloudflare Pages Functions ─────────────────────────────────────
 
-// This handler is only for the Worker context; static assets are served by Pages.
-export default app;
+export const onRequest = handle(app);
