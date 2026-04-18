@@ -11,7 +11,6 @@ interface Env {
   GITHUB_VAULT_REPO: string;
   GITHUB_VAULT_PATH: string;
   GITHUB_VAULT_BRANCH: string;
-  ACCESS_PUBLIC_KEY: string;
 }
 
 interface UserRow {
@@ -83,14 +82,11 @@ async function initDB(db: D1Database) {
 // We decode it (without full signature verification — the Access gate already
 // guaranteed authenticity) to extract the user's email and identity.
 
-function decodeAccessJWT(token: string): { email: string; name?: string } | null {
+function decodeJWT(token: string): Record<string, any> | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    // Access JWT payload has: email, sub, iss, aud, exp, iat
-    if (!payload.email) return null;
-    return { email: payload.email as string, name: payload.name };
+    return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
   } catch {
     return null;
   }
@@ -99,32 +95,45 @@ function decodeAccessJWT(token: string): { email: string; name?: string } | null
 // ─── Auth Middleware (Cloudflare Access) ──────────────────────────────────────
 
 const authMiddleware = async (c: any, next: any) => {
-  // Cloudflare Access sets this header on every authenticated request
-  const accessJwt = c.req.header('Cf-Access-Jwt-Assertion');
+  // Cloudflare Access identity arrives via:
+  // 1. Cf-Access-Jwt-Assertion header (set by Access on proxied requests)
+  // 2. CF_Authorization cookie (set by Access login on the browser)
+  // 3. JWT claim in Cf-Access-Jwt-Assertion contains the email
+  // Try header first, then cookie
+  let accessJwt = c.req.header('Cf-Access-Jwt-Assertion');
+  if (!accessJwt) {
+    // Read from cookie — name varies (CF_Authorization or cf_authorization)
+    const cookieHeader = c.req.header('Cookie') || '';
+    const match = cookieHeader.match(/(?:CF_Authorization|cf_authorization)=([^;]+)/);
+    if (match) accessJwt = match[1];
+  }
+
   if (!accessJwt) {
     return c.json({ error: 'Unauthorized — Cloudflare Access required' }, 401);
   }
 
-  const identity = decodeAccessJWT(accessJwt);
-  if (!identity) {
+  const claims = decodeJWT(accessJwt);
+  if (!claims?.email) {
     return c.json({ error: 'Invalid Access token' }, 401);
   }
 
+  const email = claims.email as string;
+  const name = (claims.name as string) || email.split('@')[0];
+
   const allowedEmails = (c.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
-  if (allowedEmails.length > 0 && !allowedEmails.includes(identity.email.toLowerCase())) {
+  if (allowedEmails.length > 0 && !allowedEmails.includes(email.toLowerCase())) {
     return c.json({ error: 'Email not allowed' }, 403);
   }
 
   await initDB(c.env.DB);
 
   // Upsert user from Access identity
-  const name = identity.name || identity.email.split('@')[0];
   await c.env.DB.prepare(
     `INSERT INTO users (id, email, name, picture) VALUES (?, ?, ?, NULL)
      ON CONFLICT(email) DO UPDATE SET name = ?`
-  ).bind(crypto.randomUUID(), identity.email, name, name).run();
+  ).bind(crypto.randomUUID(), email, name, name).run();
 
-  const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(identity.email).first<UserRow>();
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
 
   c.set('user', { id: user!.id, email: user!.email, name: user!.name });
   await next();
