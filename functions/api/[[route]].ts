@@ -86,7 +86,16 @@ function decodeJWT(token: string): Record<string, any> | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    // Access JWTs use base64url — convert to regular base64 for atob
+    let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    // Pad with = to make valid base64
+    while (payload.length % 4 !== 0) payload += '=';
+    const decoded = atob(payload);
+    // Handle UTF-8 — atob returns binary string, but JSON is UTF-8
+    const bytes = new Uint8Array(decoded.length);
+    for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+    const text = new TextDecoder('utf-8').decode(bytes);
+    return JSON.parse(text);
   } catch {
     return null;
   }
@@ -95,48 +104,49 @@ function decodeJWT(token: string): Record<string, any> | null {
 // ─── Auth Middleware (Cloudflare Access) ──────────────────────────────────────
 
 const authMiddleware = async (c: any, next: any) => {
-  // Cloudflare Access identity arrives via:
-  // 1. Cf-Access-Jwt-Assertion header (set by Access on proxied requests)
-  // 2. CF_Authorization cookie (set by Access login on the browser)
-  // 3. JWT claim in Cf-Access-Jwt-Assertion contains the email
-  // Try header first, then cookie
-  let accessJwt = c.req.header('Cf-Access-Jwt-Assertion');
-  if (!accessJwt) {
-    // Read from cookie — name varies (CF_Authorization or cf_authorization)
-    const cookieHeader = c.req.header('Cookie') || '';
-    const match = cookieHeader.match(/(?:CF_Authorization|cf_authorization)=([^;]+)/);
-    if (match) accessJwt = match[1];
+  try {
+    // Cloudflare Access identity arrives via:
+    // 1. Cf-Access-Jwt-Assertion header (set by Access on proxied requests)
+    // 2. CF_Authorization cookie (set by Access login on the browser)
+    let accessJwt = c.req.header('Cf-Access-Jwt-Assertion');
+    if (!accessJwt) {
+      const cookieHeader = c.req.header('Cookie') || '';
+      const match = cookieHeader.match(/(?:CF_Authorization|cf_authorization)=([^;]+)/);
+      if (match) accessJwt = match[1];
+    }
+
+    if (!accessJwt) {
+      return c.json({ error: 'Unauthorized — Cloudflare Access required' }, 401);
+    }
+
+    const claims = decodeJWT(accessJwt);
+    if (!claims?.email) {
+      return c.json({ error: 'Invalid Access token', debug_jwtLength: accessJwt.length, debug_claimsKeys: claims ? Object.keys(claims) : null }, 401);
+    }
+
+    const email = claims.email as string;
+    const name = (claims.name as string) || email.split('@')[0];
+
+    const allowedEmails = (c.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
+    if (allowedEmails.length > 0 && !allowedEmails.includes(email.toLowerCase())) {
+      return c.json({ error: 'Email not allowed', email }, 403);
+    }
+
+    await initDB(c.env.DB);
+
+    // Upsert user from Access identity
+    await c.env.DB.prepare(
+      `INSERT INTO users (id, email, name, picture) VALUES (?, ?, ?, NULL)
+       ON CONFLICT(email) DO UPDATE SET name = ?`
+    ).bind(crypto.randomUUID(), email, name, name).run();
+
+    const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
+
+    c.set('user', { id: user!.id, email: user!.email, name: user!.name });
+    await next();
+  } catch (err: any) {
+    return c.json({ error: 'Auth middleware error', message: err?.message || String(err), stack: err?.stack?.split('\n').slice(0,3) }, 500);
   }
-
-  if (!accessJwt) {
-    return c.json({ error: 'Unauthorized — Cloudflare Access required' }, 401);
-  }
-
-  const claims = decodeJWT(accessJwt);
-  if (!claims?.email) {
-    return c.json({ error: 'Invalid Access token' }, 401);
-  }
-
-  const email = claims.email as string;
-  const name = (claims.name as string) || email.split('@')[0];
-
-  const allowedEmails = (c.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
-  if (allowedEmails.length > 0 && !allowedEmails.includes(email.toLowerCase())) {
-    return c.json({ error: 'Email not allowed' }, 403);
-  }
-
-  await initDB(c.env.DB);
-
-  // Upsert user from Access identity
-  await c.env.DB.prepare(
-    `INSERT INTO users (id, email, name, picture) VALUES (?, ?, ?, NULL)
-     ON CONFLICT(email) DO UPDATE SET name = ?`
-  ).bind(crypto.randomUUID(), email, name, name).run();
-
-  const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
-
-  c.set('user', { id: user!.id, email: user!.email, name: user!.name });
-  await next();
 };
 
 // ─── Health ──────────────────────────────────────────────────────────────────
