@@ -154,30 +154,7 @@ const authMiddleware = async (c: any, next: any) => {
 
 app.get('/api/health', (c) => c.json({ status: 'ok', service: 'wish.kaleb.one', auth: 'cloudflare-access' }));
 
-// ─── Debug: show what auth headers/cookies arrive ─────────────────────────────
-
-app.get('/api/auth/debug', (c) => {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of Object.entries(c.req.raw.headers)) {
-    if (k.toLowerCase().startsWith('cf-') || k.toLowerCase() === 'cookie' || k.toLowerCase() === 'authorization') {
-      // Truncate cookie values for security
-      if (k.toLowerCase() === 'cookie') {
-        headers[k] = v.replace(/=(eyJ[^;]{10})[^;]+/g, '=$1...(truncated)');
-      } else {
-        headers[k] = v;
-      }
-    }
-  }
-  return c.json({
-    cfAccessJwtAssertion: c.req.header('Cf-Access-Jwt-Assertion') ? 'present' : 'missing',
-    cookieHeader: c.req.header('Cookie') ? 'present' : 'missing',
-    cfAuthCookie: (c.req.header('Cookie') || '').match(/CF_Authorization=([^;]+)/) ? 'present' : 'missing',
-    allRelevantHeaders: headers,
-    envAllowedEmails: c.env.ALLOWED_EMAILS || 'not set',
-  });
-});
-
-// ─── Auth Routes (simplified — Access handles auth) ──────────────────────────
+// ─── Auth Routes ─────────────────────────────────────────────────────────────
 
 app.get('/api/auth/me', authMiddleware, (c) => {
   const user = c.get('user');
