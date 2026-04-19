@@ -50,15 +50,16 @@ app.use('/api/*', cors({
 // ─── D1 Schema Initialization ────────────────────────────────────────────────
 
 async function initDB(db: D1Database) {
-  await db.exec(`
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
       name TEXT NOT NULL,
       picture TEXT,
       created_at TEXT DEFAULT (datetime('now'))
-    );
-
+    )
+  `).run();
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS items (
       id TEXT PRIMARY KEY,
       url TEXT NOT NULL,
@@ -72,8 +73,8 @@ async function initDB(db: D1Database) {
       purchased_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       deleted_at TEXT
-    );
-  `);
+    )
+  `).run();
 }
 
 // ─── Cloudflare Access JWT Decoder ────────────────────────────────────────────
