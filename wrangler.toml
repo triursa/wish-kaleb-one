@@ -5,7 +5,7 @@ pages_build_output_dir = "./dist"
 [vars]
 ALLOWED_EMAILS = "melindajean16@gmail.com,kaleb.bays@gmail.com"
 GITHUB_VAULT_REPO = "triursa/second-brain-vault"
-GITHUB_VAULT_PATH = "domains/wishlist/BACKLOG.md"
+GITHUB_VAULT_PATH = "domains/wishlist"
 GITHUB_VAULT_BRANCH = "master"
 
 [[d1_databases]]
