@@ -54,6 +54,30 @@ interface ItemRow {
   list_slug: string | null;
   list_emoji: string | null;
   list_accent: string | null;
+  occasion_id: string | null;
+  tag_names: string | null;
+  tag_ids: string | null;
+}
+
+interface TagRow {
+  id: string;
+  name: string;
+}
+
+interface OccasionRow {
+  id: string;
+  list_id: string;
+  name: string;
+  date: string;
+  emoji: string;
+  created_at: string;
+}
+
+interface PriceSnapshotRow {
+  id: string;
+  item_id: string;
+  price: string;
+  scraped_at: string;
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -66,6 +90,10 @@ app.use('/api/*', cors({
 }));
 
 // ─── D1 Schema Initialization ────────────────────────────────────────────────
+
+const DEFAULT_TAGS = [
+  'Jewelry', 'Clothing', 'Home', 'Tech', 'Experiences', 'Books', 'Other', 'Toys'
+];
 
 async function initDB(db: D1Database) {
   await db.prepare(`
@@ -132,6 +160,34 @@ async function initDB(db: D1Database) {
       created_at TEXT DEFAULT (datetime('now'))
     )
   `).run();
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS occasions (
+      id TEXT PRIMARY KEY,
+      list_id TEXT NOT NULL REFERENCES lists(id),
+      name TEXT NOT NULL,
+      date TEXT NOT NULL,
+      emoji TEXT DEFAULT '🎉',
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `).run();
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS price_snapshots (
+      id TEXT PRIMARY KEY,
+      item_id TEXT NOT NULL REFERENCES items(id),
+      price TEXT NOT NULL,
+      scraped_at TEXT DEFAULT (datetime('now'))
+    )
+  `).run();
+
+  // Ensure occasion_id column exists on items (additive migration)
+  try {
+    await db.prepare(`ALTER TABLE items ADD COLUMN occasion_id TEXT REFERENCES occasions(id)`).run();
+  } catch {}
+
+  // Seed default tags
+  for (const tagName of DEFAULT_TAGS) {
+    await db.prepare(`INSERT OR IGNORE INTO tags (id, name) VALUES (?, ?)`).bind(crypto.randomUUID(), tagName).run();
+  }
 }
 
 // ─── Cloudflare Access JWT Decoder ────────────────────────────────────────────
@@ -234,9 +290,20 @@ async function logActivity(db: D1Database, listId: string, action: string, actor
   ).bind(crypto.randomUUID(), listId, action, actorId, itemId, metadata ? JSON.stringify(metadata) : null).run();
 }
 
+function hideClaimerForOwner(item: any, user: any, list: ListRow | null) {
+  if (!item) return item;
+  if (!list) return item;
+  const isOwner = list.owner_id === user.id;
+  const isSharedList = list.owner_id === null;
+  if ((isOwner || isSharedList) && item.claimed_by && item.claimed_by !== user.id) {
+    return { ...item, claimed_by: 'hidden', claimed_at: item.claimed_at };
+  }
+  return item;
+}
+
 // ─── Health ──────────────────────────────────────────────────────────────────
 
-app.get('/api/health', (c) => c.json({ status: 'ok', service: 'wish.kaleb.one', version: '2.0', auth: 'cloudflare-access' }));
+app.get('/api/health', (c) => c.json({ status: 'ok', service: 'wish.kaleb.one', version: '2.1', auth: 'cloudflare-access' }));
 
 // ─── Auth Routes ─────────────────────────────────────────────────────────────
 
@@ -274,7 +341,169 @@ app.get('/api/lists/:slug', authMiddleware, async (c) => {
   return c.json(list);
 });
 
+// ─── Tags Routes ─────────────────────────────────────────────────────────────
+
+app.get('/api/tags', authMiddleware, async (c) => {
+  await initDB(c.env.DB);
+  const tags = await c.env.DB.prepare('SELECT * FROM tags ORDER BY name ASC').all<TagRow>();
+  return c.json(tags.results);
+});
+
+app.post('/api/items/:id/tags', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const body = await c.req.json();
+  const { tag_id } = body;
+  if (!tag_id) return c.json({ error: 'tag_id required' }, 400);
+  await initDB(c.env.DB);
+
+  const item = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<ItemRow>();
+  if (!item || item.deleted_at) return c.json({ error: 'Item not found' }, 404);
+
+  const list = await c.env.DB.prepare('SELECT * FROM lists WHERE id = ?').bind(item.list_id).first<ListRow>();
+  const isOwner = list?.owner_id === user.id;
+  const isShared = list?.owner_id === null;
+  if (!isOwner && !isShared && item.added_by !== user.id) {
+    return c.json({ error: 'Not authorized' }, 403);
+  }
+
+  await c.env.DB.prepare('INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)').bind(id, tag_id).run();
+  return c.json({ ok: true });
+});
+
+app.delete('/api/items/:id/tags/:tagId', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const tagId = c.req.param('tagId');
+  await initDB(c.env.DB);
+
+  const item = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<ItemRow>();
+  if (!item || item.deleted_at) return c.json({ error: 'Item not found' }, 404);
+
+  const list = await c.env.DB.prepare('SELECT * FROM lists WHERE id = ?').bind(item.list_id).first<ListRow>();
+  const isOwner = list?.owner_id === user.id;
+  const isShared = list?.owner_id === null;
+  if (!isOwner && !isShared && item.added_by !== user.id) {
+    return c.json({ error: 'Not authorized' }, 403);
+  }
+
+  await c.env.DB.prepare('DELETE FROM item_tags WHERE item_id = ? AND tag_id = ?').bind(id, tagId).run();
+  return c.json({ ok: true });
+});
+
+// ─── Occasions Routes ──────────────────────────────────────────────────────────
+
+app.get('/api/lists/:listId/occasions', authMiddleware, async (c) => {
+  const listId = c.req.param('listId');
+  await initDB(c.env.DB);
+  const occasions = await c.env.DB.prepare('SELECT * FROM occasions WHERE list_id = ? ORDER BY date ASC').bind(listId).all<OccasionRow>();
+  return c.json(occasions.results);
+});
+
+app.post('/api/lists/:listId/occasions', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const listId = c.req.param('listId');
+  const body = await c.req.json();
+  const { name, date, emoji } = body;
+  if (!name || !date) return c.json({ error: 'name and date required' }, 400);
+  await initDB(c.env.DB);
+
+  const list = await c.env.DB.prepare('SELECT * FROM lists WHERE id = ?').bind(listId).first<ListRow>();
+  if (!list) return c.json({ error: 'List not found' }, 404);
+  const isOwner = list.owner_id === user.id;
+  const isShared = list.owner_id === null;
+  if (!isOwner && !isShared) return c.json({ error: 'Not authorized' }, 403);
+
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare('INSERT INTO occasions (id, list_id, name, date, emoji) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, listId, name, date, emoji || '🎉').run();
+  await logActivity(c.env.DB, listId, 'occasion_created', user.id, null, { name, date });
+  syncToGitHub(c.env).catch(() => {});
+
+  const occasion = await c.env.DB.prepare('SELECT * FROM occasions WHERE id = ?').bind(id).first<OccasionRow>();
+  return c.json(occasion, 201);
+});
+
+app.delete('/api/occasions/:id', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  await initDB(c.env.DB);
+
+  const occasion = await c.env.DB.prepare('SELECT * FROM occasions WHERE id = ?').bind(id).first<OccasionRow>();
+  if (!occasion) return c.json({ error: 'Occasion not found' }, 404);
+
+  const list = await c.env.DB.prepare('SELECT * FROM lists WHERE id = ?').bind(occasion.list_id).first<ListRow>();
+  const isOwner = list?.owner_id === user.id;
+  const isShared = list?.owner_id === null;
+  if (!isOwner && !isShared) return c.json({ error: 'Not authorized' }, 403);
+
+  await c.env.DB.prepare('DELETE FROM occasions WHERE id = ?').bind(id).run();
+  await c.env.DB.prepare('UPDATE items SET occasion_id = NULL WHERE occasion_id = ?').bind(id).run();
+  await logActivity(c.env.DB, occasion.list_id, 'occasion_deleted', user.id, null, { name: occasion.name });
+  syncToGitHub(c.env).catch(() => {});
+
+  return c.json({ ok: true });
+});
+
+// ─── Price History Routes ─────────────────────────────────────────────────────
+
+app.get('/api/items/:id/prices', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  await initDB(c.env.DB);
+  const snapshots = await c.env.DB.prepare('SELECT * FROM price_snapshots WHERE item_id = ? ORDER BY scraped_at ASC').bind(id).all<PriceSnapshotRow>();
+  return c.json(snapshots.results);
+});
+
+app.post('/api/items/:id/rescrape', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  await initDB(c.env.DB);
+
+  const item = await c.env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<ItemRow>();
+  if (!item || item.deleted_at) return c.json({ error: 'Item not found' }, 404);
+
+  const meta = await scrapeUrl(item.url);
+  if (!meta.price) return c.json({ error: 'Could not scrape price' }, 400);
+
+  const lastSnapshot = await c.env.DB.prepare('SELECT * FROM price_snapshots WHERE item_id = ? ORDER BY scraped_at DESC LIMIT 1').bind(id).first<PriceSnapshotRow>();
+
+  let saved = false;
+  if (!lastSnapshot || lastSnapshot.price !== meta.price) {
+    await c.env.DB.prepare('INSERT INTO price_snapshots (id, item_id, price) VALUES (?, ?, ?)')
+      .bind(crypto.randomUUID(), id, meta.price).run();
+    saved = true;
+    if (item.price !== meta.price) {
+      await c.env.DB.prepare('UPDATE items SET price = ? WHERE id = ?').bind(meta.price, id).run();
+    }
+  }
+
+  return c.json({ ok: true, price: meta.price, saved, previous: lastSnapshot?.price || null });
+});
+
 // ─── Items Routes ────────────────────────────────────────────────────────────
+
+async function attachTags(db: D1Database, items: any[]) {
+  if (items.length === 0) return items;
+  const itemIds = items.map(i => i.id);
+  // D1 doesn't support IN with variable list easily; batch into chunks of 50 via OR
+  const tagRows = await db.prepare(`
+    SELECT it.item_id, t.id as tag_id, t.name as tag_name
+    FROM item_tags it
+    JOIN tags t ON it.tag_id = t.id
+    WHERE it.item_id IN (${itemIds.map(() => '?').join(',')})
+  `).bind(...itemIds).all();
+
+  const tagMap: Record<string, { id: string; name: string }[]> = {};
+  for (const row of tagRows.results as any[]) {
+    if (!tagMap[row.item_id]) tagMap[row.item_id] = [];
+    tagMap[row.item_id].push({ id: row.tag_id, name: row.tag_name });
+  }
+
+  return items.map(item => ({
+    ...item,
+    tags: tagMap[item.id] || [],
+  }));
+}
 
 // GET /api/lists/:listId/items — items for a specific list
 app.get('/api/lists/:listId/items', authMiddleware, async (c) => {
@@ -298,13 +527,14 @@ app.get('/api/lists/:listId/items', authMiddleware, async (c) => {
   // Hide claimed_by from list owners (surprise preservation)
   const isOwner = list.owner_id === user.id;
   const isSharedList = list.owner_id === null;
-  const results = items.results.map(item => {
+  let results = items.results.map(item => {
     if ((isOwner || isSharedList) && item.claimed_by && item.claimed_by !== user.id) {
-      // Hide who claimed it from the list owner
       return { ...item, claimed_by: 'hidden', claimed_at: item.claimed_at };
     }
     return item;
   });
+
+  results = await attachTags(c.env.DB, results);
 
   return c.json(results);
 });
@@ -329,7 +559,7 @@ app.get('/api/items', authMiddleware, async (c) => {
   const listOwnerMap: Record<string, string | null> = {};
   for (const l of allLists.results) listOwnerMap[l.id] = l.owner_id;
 
-  const results = items.results.map(item => {
+  let results = items.results.map(item => {
     const listOwnerId = listOwnerMap[item.list_id];
     const isOwner = listOwnerId === user.id;
     const isSharedList = listOwnerId === null;
@@ -339,6 +569,8 @@ app.get('/api/items', authMiddleware, async (c) => {
     return item;
   });
 
+  results = await attachTags(c.env.DB, results);
+
   return c.json(results);
 });
 
@@ -347,7 +579,7 @@ app.post('/api/lists/:listId/items', authMiddleware, async (c) => {
   const user = c.get('user');
   const listId = c.req.param('listId');
   const body = await c.req.json();
-  const { url, notes, priority } = body;
+  const { url, notes, priority, title, price, image_url, store_name, tag_ids, occasion_id } = body;
 
   if (!url) return c.json({ error: 'URL is required' }, 400);
   await initDB(c.env.DB);
@@ -358,27 +590,54 @@ app.post('/api/lists/:listId/items', authMiddleware, async (c) => {
   // Check permissions: owner can add to their list, anyone can add to shared lists
   const isOwner = list.owner_id === user.id;
   const isShared = list.owner_id === null;
-  // Actually: for personal lists, only the owner can add. For shared (teddy), anyone can add.
   if (!isOwner && !isShared) {
     return c.json({ error: 'Only the list owner can add items' }, 403);
   }
 
-  const meta = await scrapeUrl(url);
+  const isManual = !!(title || price || image_url || store_name);
+
+  let meta: { title: string | null; price: string | null; image: string | null; store: string | null };
+  if (isManual) {
+    meta = {
+      title: title || null,
+      price: price || null,
+      image: image_url || null,
+      store: store_name || null,
+    };
+  } else {
+    meta = await scrapeUrl(url);
+  }
+
+  // If scraper returns null title, fallback to URL as title
+  const finalTitle = meta.title || url;
 
   const itemPriority = priority || 0;
   const id = crypto.randomUUID();
   await c.env.DB.prepare(`
-    INSERT INTO items (id, list_id, url, title, price, image_url, store_name, notes, added_by, priority)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO items (id, list_id, url, title, price, image_url, store_name, notes, added_by, priority, occasion_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    id, listId, url, meta.title || url, meta.price || null, meta.image || null,
-    meta.store || null, notes || null, user.id, itemPriority
+    id, listId, url, finalTitle, meta.price || null, meta.image || null,
+    meta.store || null, notes || null, user.id, itemPriority, occasion_id || null
   ).run();
+
+  // Attach tags
+  if (Array.isArray(tag_ids) && tag_ids.length > 0) {
+    for (const tagId of tag_ids) {
+      await c.env.DB.prepare('INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)').bind(id, tagId).run();
+    }
+  }
+
+  // Save initial price snapshot
+  if (meta.price) {
+    await c.env.DB.prepare('INSERT INTO price_snapshots (id, item_id, price) VALUES (?, ?, ?)')
+      .bind(crypto.randomUUID(), id, meta.price).run();
+  }
 
   await logActivity(c.env.DB, listId, 'added', user.id, id);
   syncToGitHub(c.env).catch(() => {});
 
-  const item = await c.env.DB.prepare(`
+  let item = await c.env.DB.prepare(`
     SELECT i.*, u.name as user_name, u.email as user_email,
            l.name as list_name, l.slug as list_slug, l.emoji as list_emoji, l.accent as list_accent
     FROM items i
@@ -387,6 +646,7 @@ app.post('/api/lists/:listId/items', authMiddleware, async (c) => {
     WHERE i.id = ?
   `).bind(id).first();
 
+  [item] = await attachTags(c.env.DB, [item]);
   return c.json(item, 201);
 });
 
@@ -461,6 +721,15 @@ app.patch('/api/items/:id', authMiddleware, async (c) => {
     await logActivity(c.env.DB, item.list_id, 'priority_changed', user.id, id, { priority: body.priority });
   }
 
+  // Occasion
+  if (body.occasion_id !== undefined) {
+    if (!isOwner && !isShared && item.added_by !== user.id) {
+      return c.json({ error: 'Not authorized' }, 403);
+    }
+    updates.push('occasion_id = ?');
+    values.push(body.occasion_id || null);
+  }
+
   if (updates.length === 0) return c.json({ error: 'No fields to update' }, 400);
 
   values.push(id);
@@ -468,7 +737,7 @@ app.patch('/api/items/:id', authMiddleware, async (c) => {
 
   syncToGitHub(c.env).catch(() => {});
 
-  const updated = await c.env.DB.prepare(`
+  let updated = await c.env.DB.prepare(`
     SELECT i.*, u.name as user_name, u.email as user_email,
            l.name as list_name, l.slug as list_slug, l.emoji as list_emoji, l.accent as list_accent
     FROM items i
@@ -481,6 +750,8 @@ app.patch('/api/items/:id', authMiddleware, async (c) => {
   if ((isOwner || isShared) && updated?.claimed_by && updated.claimed_by !== user.id) {
     (updated as any).claimed_by = 'hidden';
   }
+
+  [updated] = await attachTags(c.env.DB, [updated]);
 
   return c.json(updated);
 });
@@ -526,7 +797,9 @@ app.get('/api/my-claims', authMiddleware, async (c) => {
     ORDER BY i.created_at DESC
   `).bind(user.id).all<ItemRow>();
 
-  return c.json(items.results);
+  let results = items.results;
+  results = await attachTags(c.env.DB, results);
+  return c.json(results);
 });
 
 // ─── Activity Route ─────────────────────────────────────────────────────────
@@ -574,6 +847,16 @@ app.post('/api/sync', authMiddleware, async (c) => {
   } catch (err: any) {
     return c.json({ ok: false, error: err.message }, 500);
   }
+});
+
+// ─── Scrape Endpoint ───────────────────────────────────────────────────────────
+
+app.post('/api/scrape', authMiddleware, async (c) => {
+  const body = await c.req.json();
+  const { url } = body;
+  if (!url) return c.json({ error: 'URL required' }, 400);
+  const meta = await scrapeUrl(url);
+  return c.json(meta);
 });
 
 // ─── Scraper ──────────────────────────────────────────────────────────────────
@@ -674,30 +957,34 @@ async function syncToGitHub(env: Env): Promise<void> {
 
   for (const list of lists.results) {
     const items = await env.DB.prepare(`
-      SELECT i.*, u.name as user_name
+      SELECT i.*, u.name as user_name, group_concat(t.name, ', ') as tag_names
       FROM items i
       JOIN users u ON i.added_by = u.id
+      LEFT JOIN item_tags it ON i.id = it.item_id
+      LEFT JOIN tags t ON it.tag_id = t.id
       WHERE i.list_id = ? AND i.deleted_at IS NULL
+      GROUP BY i.id
       ORDER BY i.priority DESC, i.created_at DESC
     `).bind(list.id).all<ItemRow>();
 
     const fileName = `${list.slug.toUpperCase()}.md`;
-    const filePath = `domains/wishlist/${fileName}`;
+    const filePath = 'domains/wishlist/' + fileName;
 
     let markdown = `# ${list.name}\n\n`;
     markdown += `> ${list.emoji} Auto-synced from [wish.kaleb.one](https://wish.kaleb.one)\n`;
     markdown += `> Last updated: ${new Date().toISOString().split('T')[0]}\n\n`;
-    markdown += `| Status | Item | Price | Store | Notes | Priority | Added |\n`;
-    markdown += `|--------|------|-------|-------|-------|----------|-------|\n`;
+    markdown += `| Status | Item | Price | Store | Tags | Notes | Priority | Added |\n`;
+    markdown += `|--------|------|-------|-------|------|-------|----------|-------|\n`;
 
     for (const item of items.results) {
       const purchaseStatus = item.purchased ? '✅' : (item.claimed_by ? '🔐' : '🎁');
       const priceStr = item.price ? `$${item.price}` : '—';
       const titleLink = `[${item.title}](${item.url})`;
       const notes = item.notes || '—';
+      const tags = item.tag_names || '—';
       const priorityLabel = item.priority === 2 ? '🔥' : item.priority === 1 ? '⬆️' : '—';
       const date = new Date(item.created_at).toLocaleDateString();
-      markdown += `| ${purchaseStatus} | ${titleLink} | ${priceStr} | ${item.store_name || '—'} | ${notes} | ${priorityLabel} | ${date} |\n`;
+      markdown += `| ${purchaseStatus} | ${titleLink} | ${priceStr} | ${item.store_name || '—'} | ${tags} | ${notes} | ${priorityLabel} | ${date} |\n`;
     }
 
     // Get existing file SHA

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -16,6 +16,18 @@ interface WishList {
   emoji: string;
   accent: string;
   created_at: string;
+}
+
+interface Tag {
+  id: string;
+  name: string;
+}
+
+interface PriceSnapshot {
+  id: string;
+  item_id: string;
+  price: string;
+  scraped_at: string;
 }
 
 interface Item {
@@ -41,6 +53,17 @@ interface Item {
   list_slug: string | null;
   list_emoji: string | null;
   list_accent: string | null;
+  occasion_id: string | null;
+  tags?: Tag[];
+}
+
+interface Occasion {
+  id: string;
+  list_id: string;
+  name: string;
+  date: string;
+  emoji: string;
+  created_at: string;
 }
 
 interface ActivityItem {
@@ -70,6 +93,7 @@ const defaultTheme = {
   textDim: '#94a3b8',
   danger: '#f87171',
   success: '#4ade80',
+  warning: '#fbbf24',
 };
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -81,14 +105,42 @@ export default function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [myClaims, setMyClaims] = useState<Item[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [occasions, setOccasions] = useState<Occasion[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'lists' | 'claims' | 'activity'>('lists');
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Filters
+  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
+  const [activeOccasionFilter, setActiveOccasionFilter] = useState<string | null>(null);
 
   // Form state
   const [urlInput, setUrlInput] = useState('');
   const [notesInput, setNotesInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+
+  // Manual mode
+  const [manualMode, setManualMode] = useState(false);
+  const [manualTitle, setManualTitle] = useState('');
+  const [manualPrice, setManualPrice] = useState('');
+  const [manualImage, setManualImage] = useState('');
+  const [manualStore, setManualStore] = useState('');
+
+  // Occasion selector in form
+  const [selectedOccasionId, setSelectedOccasionId] = useState<string>('');
+  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+
+  // Occasions panel
+  const [showOccasions, setShowOccasions] = useState(false);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth <= 640);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     fetch('/api/auth/me', { credentials: 'include' })
@@ -100,6 +152,7 @@ export default function App() {
           fetchLists();
           fetchMyClaims();
           fetchActivity();
+          fetchTags();
         }
       })
       .catch(() => setLoading(false));
@@ -114,8 +167,10 @@ export default function App() {
         if (data.length > 0 && !activeListId) {
           setActiveListId(data[0].id);
           fetchListItems(data[0].id);
+          fetchListOccasions(data[0].id);
         } else if (activeListId) {
           fetchListItems(activeListId);
+          fetchListOccasions(activeListId);
         }
       }
     } catch {}
@@ -145,15 +200,38 @@ export default function App() {
     } catch {}
   }, []);
 
+  const fetchTags = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tags', { credentials: 'include' });
+      if (res.ok) setTags(await res.json());
+    } catch {}
+  }, []);
+
+  const fetchListOccasions = useCallback(async (listId: string) => {
+    try {
+      const res = await fetch(`/api/lists/${listId}/occasions`, { credentials: 'include' });
+      if (res.ok) setOccasions(await res.json());
+    } catch {}
+  }, []);
+
   const switchList = (listId: string) => {
     setActiveListId(listId);
     setItems([]);
+    setActiveTagFilter(null);
+    setActiveOccasionFilter(null);
     fetchListItems(listId);
+    fetchListOccasions(listId);
   };
 
   const activeList = lists.find(l => l.id === activeListId);
   const isOwnerOfActiveList = activeList?.owner_id === user?.id;
   const isSharedList = activeList?.owner_id === null;
+
+  const filteredItems = items.filter(item => {
+    const tagMatch = activeTagFilter ? item.tags?.some(t => t.id === activeTagFilter) : true;
+    const occasionMatch = activeOccasionFilter ? item.occasion_id === activeOccasionFilter : true;
+    return tagMatch && occasionMatch;
+  });
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,15 +239,34 @@ export default function App() {
     setSubmitting(true);
     setError('');
     try {
+      const payload: any = {
+        url: urlInput.trim(),
+        notes: notesInput.trim() || undefined,
+        tag_ids: selectedTagIds.length > 0 ? selectedTagIds : undefined,
+        occasion_id: selectedOccasionId || undefined,
+      };
+      if (manualMode) {
+        payload.title = manualTitle.trim() || undefined;
+        payload.price = manualPrice.trim() || undefined;
+        payload.image_url = manualImage.trim() || undefined;
+        payload.store_name = manualStore.trim() || undefined;
+      }
       const res = await fetch(`/api/lists/${activeListId}/items`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ url: urlInput.trim(), notes: notesInput.trim() || undefined }),
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
         setUrlInput('');
         setNotesInput('');
+        setSelectedTagIds([]);
+        setSelectedOccasionId('');
+        setManualMode(false);
+        setManualTitle('');
+        setManualPrice('');
+        setManualImage('');
+        setManualStore('');
         await fetchListItems(activeListId);
         fetchMyClaims();
         fetchActivity();
@@ -247,9 +344,62 @@ export default function App() {
     } catch {}
   };
 
-  const pendingCount = items.filter(i => !i.purchased && !i.claimed_by).length;
-  const claimedCount = items.filter(i => i.claimed_by && !i.purchased).length;
-  const purchasedCount = items.filter(i => i.purchased).length;
+  const handleCheckPrice = async (item: Item) => {
+    try {
+      const res = await fetch(`/api/items/${item.id}/rescrape`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        await fetchListItems(item.list_id);
+      }
+    } catch {}
+  };
+
+  const handleAddOccasion = async (name: string, date: string, emoji: string) => {
+    if (!activeListId) return;
+    try {
+      const res = await fetch(`/api/lists/${activeListId}/occasions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ name, date, emoji }),
+      });
+      if (res.ok) {
+        fetchListOccasions(activeListId);
+      }
+    } catch {}
+  };
+
+  const handleDeleteOccasion = async (occasionId: string) => {
+    if (!confirm('Remove this occasion?')) return;
+    try {
+      const res = await fetch(`/api/occasions/${occasionId}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        fetchListOccasions(activeListId || '');
+      }
+    } catch {}
+  };
+
+  // Detect share-target query params
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sharedUrl = params.get('url') || params.get('text') || '';
+    if (sharedUrl && user) {
+      const u = sharedUrl.match(/https?:\/\/[^\s]+/)?.[0] || sharedUrl;
+      if (u.startsWith('http')) {
+        setUrlInput(u);
+        setView('lists');
+      }
+    }
+  }, [user]);
+
+  const pendingCount = filteredItems.filter(i => !i.purchased && !i.claimed_by).length;
+  const claimedCount = filteredItems.filter(i => i.claimed_by && !i.purchased).length;
+  const purchasedCount = filteredItems.filter(i => i.purchased).length;
 
   // ─── Loading ──────────────────────────────────────────────────────────
 
@@ -307,6 +457,7 @@ export default function App() {
   // ─── Main View ──────────────────────────────────────────────────────
 
   const accent = activeList?.accent || '#c084fc';
+  const formCanSubmit = urlInput.trim().length > 0 && (!manualMode || manualTitle.trim().length > 0);
 
   return (
     <div style={globalStyles}>
@@ -322,13 +473,13 @@ export default function App() {
         filter: 'blur(80px)', pointerEvents: 'none', zIndex: 0,
       }} />
 
-      <div style={{ position: 'relative', zIndex: 1, maxWidth: '1200px', margin: '0 auto', padding: '2rem 1.5rem' }}>
+      <div style={{ position: 'relative', zIndex: 1, maxWidth: '1200px', margin: '0 auto', padding: isMobile ? '1rem 0.75rem' : '2rem 1.5rem' }}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '1rem' : '1.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
           <div>
             <h1 style={{
               fontFamily: 'Georgia, serif',
-              fontSize: '2rem',
+              fontSize: isMobile ? '1.6rem' : '2rem',
               fontWeight: 400,
               background: `linear-gradient(135deg, ${accent}, ${accent}cc)`,
               WebkitBackgroundClip: 'text',
@@ -342,7 +493,7 @@ export default function App() {
               {user.name}
             </p>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
             <NavButton
               active={view === 'lists'}
               onClick={() => setView('lists')}
@@ -372,7 +523,7 @@ export default function App() {
         {view === 'lists' && (
           <>
             {/* List Tabs */}
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
               {lists.map(list => (
                 <button
                   key={list.id}
@@ -381,7 +532,7 @@ export default function App() {
                     background: activeListId === list.id ? `${list.accent}22` : defaultTheme.glass,
                     border: `1px solid ${activeListId === list.id ? `${list.accent}66` : defaultTheme.glassBorder}`,
                     borderRadius: '0.75rem',
-                    padding: '0.6rem 1.2rem',
+                    padding: isMobile ? '0.55rem 0.9rem' : '0.6rem 1.2rem',
                     color: activeListId === list.id ? list.accent : defaultTheme.textDim,
                     cursor: 'pointer',
                     fontSize: '0.95rem',
@@ -389,12 +540,55 @@ export default function App() {
                     backdropFilter: 'blur(20px)',
                     transition: 'all 0.2s ease',
                     fontFamily: "'Inter', sans-serif",
+                    minHeight: '44px',
                   }}
                 >
                   {list.emoji} {list.name}
                 </button>
               ))}
             </div>
+
+            {/* Tag filter bar */}
+            {tags.length > 0 && (
+              <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                  onClick={() => setActiveTagFilter(null)}
+                  style={tagChipStyle(activeTagFilter === null, accent)}
+                >
+                  All
+                </button>
+                {tags.map(tag => (
+                  <button
+                    key={tag.id}
+                    onClick={() => setActiveTagFilter(activeTagFilter === tag.id ? null : tag.id)}
+                    style={tagChipStyle(activeTagFilter === tag.id, accent)}
+                  >
+                    {tag.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Occasion filter bar */}
+            {occasions.length > 0 && (
+              <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                  onClick={() => setActiveOccasionFilter(null)}
+                  style={tagChipStyle(activeOccasionFilter === null, accent)}
+                >
+                  Anytime
+                </button>
+                {occasions.map(occ => (
+                  <button
+                    key={occ.id}
+                    onClick={() => setActiveOccasionFilter(activeOccasionFilter === occ.id ? null : occ.id)}
+                    style={tagChipStyle(activeOccasionFilter === occ.id, accent)}
+                  >
+                    {occ.emoji} {occ.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {/* List Stats */}
             {activeList && (
@@ -403,64 +597,47 @@ export default function App() {
               </p>
             )}
 
-            {/* Add Item Form — only for list owners or shared lists */}
+            {/* Occasions Panel */}
+            {(isOwnerOfActiveList || isSharedList) && (
+              <OccasionsPanel
+                occasions={occasions}
+                show={showOccasions}
+                onToggle={() => setShowOccasions(s => !s)}
+                accent={accent}
+                onAdd={handleAddOccasion}
+                onDelete={handleDeleteOccasion}
+              />
+            )}
+
+            {/* Add Item Form */}
             {activeListId && (isOwnerOfActiveList || isSharedList) && (
-              <form onSubmit={handleAdd} style={{
-                background: defaultTheme.glass,
-                border: `1px solid ${defaultTheme.glassBorder}`,
-                borderRadius: '1rem',
-                padding: '1.25rem',
-                marginBottom: '1.5rem',
-                backdropFilter: 'blur(20px)',
-                display: 'flex',
-                gap: '0.75rem',
-                flexWrap: 'wrap',
-                alignItems: 'flex-end',
-              }}>
-                <div style={{ flex: '2 1 300px', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
-                  <label style={{ fontSize: '0.75rem', color: defaultTheme.textDim, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Product URL
-                  </label>
-                  <input
-                    type="url"
-                    value={urlInput}
-                    onChange={e => setUrlInput(e.target.value)}
-                    placeholder="https://www.etsy.com/listing/..."
-                    required
-                    style={inputStyle}
-                  />
-                </div>
-                <div style={{ flex: '1 1 200px', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
-                  <label style={{ fontSize: '0.75rem', color: defaultTheme.textDim, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Notes (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={notesInput}
-                    onChange={e => setNotesInput(e.target.value)}
-                    placeholder="Size, color, variant..."
-                    style={inputStyle}
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  style={{
-                    background: `linear-gradient(135deg, ${accent}, ${accent}dd)`,
-                    border: 'none',
-                    borderRadius: '0.5rem',
-                    padding: '0.65rem 1.5rem',
-                    color: '#fff',
-                    fontSize: '0.95rem',
-                    fontWeight: 500,
-                    cursor: submitting ? 'wait' : 'pointer',
-                    opacity: submitting ? 0.6 : 1,
-                    transition: 'all 0.2s ease',
-                  }}
-                >
-                  {submitting ? 'Adding…' : 'Add'}
-                </button>
-              </form>
+              <AddItemForm
+                isMobile={isMobile}
+                accent={accent}
+                manualMode={manualMode}
+                setManualMode={setManualMode}
+                urlInput={urlInput}
+                setUrlInput={setUrlInput}
+                notesInput={notesInput}
+                setNotesInput={setNotesInput}
+                manualTitle={manualTitle}
+                setManualTitle={setManualTitle}
+                manualPrice={manualPrice}
+                setManualPrice={setManualPrice}
+                manualImage={manualImage}
+                setManualImage={setManualImage}
+                manualStore={manualStore}
+                setManualStore={setManualStore}
+                selectedOccasionId={selectedOccasionId}
+                setSelectedOccasionId={setSelectedOccasionId}
+                selectedTagIds={selectedTagIds}
+                setSelectedTagIds={setSelectedTagIds}
+                occasions={occasions}
+                tags={tags}
+                submitting={submitting}
+                onSubmit={handleAdd}
+                canSubmit={formCanSubmit}
+              />
             )}
 
             {error && (
@@ -478,20 +655,20 @@ export default function App() {
             )}
 
             {/* Items Grid */}
-            {items.length === 0 ? (
+            {filteredItems.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '4rem 1rem', color: defaultTheme.textDim }}>
                 <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>{activeList?.emoji || '🎁'}</div>
                 <p style={{ fontFamily: 'Georgia, serif', fontSize: '1.25rem', margin: 0 }}>
-                  Nothing here yet — paste a URL above!
+                  {items.length === 0 ? 'Nothing here yet — paste a URL above!' : 'No items match your filters.'}
                 </p>
               </div>
             ) : (
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-                gap: '1.25rem',
+                gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(320px, 1fr))',
+                gap: isMobile ? '1rem' : '1.25rem',
               }}>
-                {items.map(item => (
+                {filteredItems.map(item => (
                   <ItemCard
                     key={item.id}
                     item={item}
@@ -503,6 +680,7 @@ export default function App() {
                     onTogglePurchased={() => handleTogglePurchased(item)}
                     onDelete={() => handleDelete(item)}
                     onSetPriority={(p) => handleSetPriority(item, p)}
+                    onCheckPrice={() => handleCheckPrice(item)}
                   />
                 ))}
               </div>
@@ -531,8 +709,8 @@ export default function App() {
             ) : (
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-                gap: '1.25rem',
+                gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(320px, 1fr))',
+                gap: isMobile ? '1rem' : '1.25rem',
               }}>
                 {myClaims.map(item => (
                   <ItemCard
@@ -546,6 +724,7 @@ export default function App() {
                     onTogglePurchased={() => {}}
                     onDelete={() => {}}
                     onSetPriority={() => {}}
+                    onCheckPrice={() => handleCheckPrice(item)}
                   />
                 ))}
               </div>
@@ -592,7 +771,7 @@ export default function App() {
                     <span style={{ fontSize: '1.2rem' }}>{getActivityEmoji(a.action)}</span>
                     <span style={{ flex: 1, color: defaultTheme.text }}>
                       <strong>{a.actor_name}</strong> {getActivityVerb(a.action)}{' '}
-                      {a.item_title && <span style={{ color: defaultTheme.textDim }}>"{a.item_title}"</span>}
+                        {a.item_title && <span style={{ color: defaultTheme.textDim }}>"{a.item_title}"</span>}
                       {a.action !== 'claimed' && a.action !== 'unclaimed' && (
                         <span style={{ color: defaultTheme.textDim }}> on {a.list_emoji} {a.list_name}</span>
                       )}
@@ -610,6 +789,25 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+// ─── Tag Chip Style ──────────────────────────────────────────────────────────────
+
+function tagChipStyle(active: boolean, accent: string): React.CSSProperties {
+  return {
+    background: active ? `${accent}22` : defaultTheme.glass,
+    border: `1px solid ${active ? `${accent}66` : defaultTheme.glassBorder}`,
+    borderRadius: '9999px',
+    padding: '0.35rem 0.75rem',
+    color: active ? accent : defaultTheme.textDim,
+    cursor: 'pointer',
+    fontSize: '0.8rem',
+    fontWeight: active ? 600 : 400,
+    backdropFilter: 'blur(20px)',
+    transition: 'all 0.2s ease',
+    fontFamily: "'Inter', sans-serif",
+    minHeight: '32px',
+  };
 }
 
 // ─── Nav Button ──────────────────────────────────────────────────────────────
@@ -636,6 +834,7 @@ function NavButton({ active, onClick, accent, badge, children }: {
         transition: 'all 0.2s ease',
         position: 'relative',
         fontFamily: "'Inter', sans-serif",
+        minHeight: '44px',
       }}
     >
       {children}
@@ -662,9 +861,240 @@ function NavButton({ active, onClick, accent, badge, children }: {
   );
 }
 
+// ─── Occasions Panel ─────────────────────────────────────────────────────────
+
+function OccasionsPanel({ occasions, show, onToggle, accent, onAdd, onDelete }: {
+  occasions: Occasion[];
+  show: boolean;
+  onToggle: () => void;
+  accent: string;
+  onAdd: (name: string, date: string, emoji: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState('');
+  const [date, setDate] = useState('');
+  const [emoji, setEmoji] = useState('🎉');
+
+  if (!show) {
+    return (
+      <button
+        onClick={onToggle}
+        style={{
+          background: defaultTheme.glass,
+          border: `1px solid ${defaultTheme.glassBorder}`,
+          borderRadius: '0.75rem',
+          padding: '0.55rem 0.9rem',
+          color: defaultTheme.textDim,
+          cursor: 'pointer',
+          fontSize: '0.9rem',
+          backdropFilter: 'blur(20px)',
+          marginBottom: '1rem',
+          minHeight: '44px',
+        }}
+      >
+        📅 Occasions ({occasions.length})
+      </button>
+    );
+  }
+
+  return (
+    <div style={{
+      background: defaultTheme.glass,
+      border: `1px solid ${defaultTheme.glassBorder}`,
+      borderRadius: '1rem',
+      padding: '1rem',
+      marginBottom: '1rem',
+      backdropFilter: 'blur(20px)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <span style={{ color: defaultTheme.text, fontWeight: 600, fontSize: '0.95rem' }}>📅 Occasions</span>
+        <button onClick={onToggle} style={{ background: 'none', border: 'none', color: defaultTheme.textDim, cursor: 'pointer', fontSize: '1rem' }}>✕</button>
+      </div>
+
+      {occasions.length === 0 && <p style={{ color: defaultTheme.textDim, fontSize: '0.85rem' }}>No occasions yet.</p>}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
+        {occasions.map(occ => (
+          <div key={occ.id} style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'rgba(255,255,255,0.03)',
+            borderRadius: '0.5rem',
+            padding: '0.5rem 0.75rem',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', color: defaultTheme.text }}>
+              <span>{occ.emoji}</span>
+              <span>{occ.name}</span>
+              <span style={{ color: defaultTheme.textDim, fontSize: '0.8rem' }}>{formatOccasionDate(occ.date)}</span>
+              <span style={{ color: accent, fontSize: '0.8rem', fontWeight: 600 }}>{daysUntil(occ.date)}</span>
+            </div>
+            <button onClick={() => onDelete(occ.id)} style={{
+              background: 'none', border: 'none', color: defaultTheme.danger, cursor: 'pointer', fontSize: '0.85rem', minHeight: '32px', minWidth: '32px',
+            }}>🗑</button>
+          </div>
+        ))}
+      </div>
+
+      {!adding ? (
+        <button onClick={() => setAdding(true)} style={{ ...actionButtonStyle(accent), minHeight: '44px' }}>+ Add occasion</button>
+      ) : (
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <input placeholder="Name" value={name} onChange={e => setName(e.target.value)} style={{ ...inputStyle, flex: '1 1 120px' }} />
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, flex: '1 1 140px' }} />
+          <input placeholder="Emoji" value={emoji} onChange={e => setEmoji(e.target.value)} style={{ ...inputStyle, width: '60px', textAlign: 'center' }} />
+          <button onClick={() => { if (name && date) { onAdd(name, date, emoji); setAdding(false); setName(''); setDate(''); setEmoji('🎉'); }}} style={{ ...actionButtonStyle(accent), minHeight: '44px' }}>Save</button>
+          <button onClick={() => setAdding(false)} style={{ ...actionButtonStyle(defaultTheme.textDim), minHeight: '44px' }}>Cancel</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatOccasionDate(dateStr: string) {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function daysUntil(dateStr: string) {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const target = new Date(dateStr);
+  target.setHours(0, 0, 0, 0);
+  const diff = Math.ceil((target.getTime() - now.getTime()) / 86400000);
+  if (diff < 0) return `${Math.abs(diff)}d ago`;
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  return `${diff} days`;
+}
+
+// ─── Add Item Form ───────────────────────────────────────────────────────────
+
+function AddItemForm({ isMobile, accent, manualMode, setManualMode, urlInput, setUrlInput, notesInput, setNotesInput, manualTitle, setManualTitle, manualPrice, setManualPrice, manualImage, setManualImage, manualStore, setManualStore, selectedOccasionId, setSelectedOccasionId, selectedTagIds, setSelectedTagIds, occasions, tags, submitting, onSubmit, canSubmit }: any) {
+  return (
+    <div style={isMobile ? addItemSheetStyle : addItemPanelStyle}>
+      <form onSubmit={onSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <label style={{ fontSize: '0.75rem', color: defaultTheme.textDim, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Add Item
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: defaultTheme.textDim, fontSize: '0.8rem', cursor: 'pointer' }}>
+            <input type="checkbox" checked={manualMode} onChange={e => setManualMode(e.target.checked)} style={{ accentColor: accent }} />
+            Enter manually
+          </label>
+        </div>
+
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <div style={{ flex: '2 1 260px', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+            <input
+              type="url"
+              value={urlInput}
+              onChange={e => setUrlInput(e.target.value)}
+              placeholder="https://www.etsy.com/listing/..."
+              required
+              style={inputStyle}
+            />
+          </div>
+          <div style={{ flex: '1 1 180px', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+            <input
+              type="text"
+              value={notesInput}
+              onChange={e => setNotesInput(e.target.value)}
+              placeholder="Size, color, variant..."
+              style={inputStyle}
+            />
+          </div>
+        </div>
+
+        {manualMode && (
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', padding: '0.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '0.75rem' }}>
+            <input type="text" value={manualTitle} onChange={e => setManualTitle(e.target.value)} placeholder="Title *" required={manualMode} style={{ ...inputStyle, flex: '2 1 200px' }} />
+            <input type="text" value={manualPrice} onChange={e => setManualPrice(e.target.value)} placeholder="Price" style={{ ...inputStyle, flex: '1 1 100px' }} />
+            <input type="url" value={manualImage} onChange={e => setManualImage(e.target.value)} placeholder="Image URL" style={{ ...inputStyle, flex: '2 1 200px' }} />
+            <input type="text" value={manualStore} onChange={e => setManualStore(e.target.value)} placeholder="Store name" style={{ ...inputStyle, flex: '1 1 130px' }} />
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <select value={selectedOccasionId} onChange={e => setSelectedOccasionId(e.target.value)} style={{ ...inputStyle, flex: '1 1 160px', minHeight: '44px' }}>
+            <option value="">No occasion</option>
+            {occasions.map((occ: Occasion) => (
+              <option key={occ.id} value={occ.id}>{occ.emoji} {occ.name}</option>
+            ))}
+          </select>
+
+          <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', flex: '2 1 220px' }}>
+            {tags.map((tag: Tag) => {
+              const selected = selectedTagIds.includes(tag.id);
+              return (
+                <button
+                  key={tag.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedTagIds((prev: string[]) =>
+                      prev.includes(tag.id) ? prev.filter(id => id !== tag.id) : [...prev, tag.id]
+                    );
+                  }}
+                  style={tagChipStyle(selected, accent)}
+                >
+                  {tag.name}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="submit"
+            disabled={submitting || !canSubmit}
+            style={{
+              background: `linear-gradient(135deg, ${accent}, ${accent}dd)`,
+              border: 'none',
+              borderRadius: '0.5rem',
+              padding: isMobile ? '0.75rem 1.25rem' : '0.65rem 1.5rem',
+              color: '#fff',
+              fontSize: '0.95rem',
+              fontWeight: 500,
+              cursor: submitting ? 'wait' : 'pointer',
+              opacity: submitting || !canSubmit ? 0.6 : 1,
+              transition: 'all 0.2s ease',
+              minHeight: '44px',
+            }}
+          >
+            {submitting ? 'Adding…' : 'Add'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+const addItemPanelStyle: React.CSSProperties = {
+  background: defaultTheme.glass,
+  border: `1px solid ${defaultTheme.glassBorder}`,
+  borderRadius: '1rem',
+  padding: '1.25rem',
+  marginBottom: '1.5rem',
+  backdropFilter: 'blur(20px)',
+};
+
+const addItemSheetStyle: React.CSSProperties = {
+  position: 'fixed',
+  bottom: 0,
+  left: 0,
+  right: 0,
+  background: 'rgba(10,10,26,0.95)',
+  borderTop: `1px solid ${defaultTheme.glassBorder}`,
+  borderRadius: '1rem 1rem 0 0',
+  padding: '1rem',
+  backdropFilter: 'blur(20px)',
+  zIndex: 50,
+  boxShadow: '0 -8px 32px rgba(0,0,0,0.5)',
+};
+
 // ─── Item Card ───────────────────────────────────────────────────────────────
 
-function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onTogglePurchased, onDelete, onSetPriority }: {
+function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onTogglePurchased, onDelete, onSetPriority, onCheckPrice }: {
   item: Item;
   user: User;
   isOwner: boolean;
@@ -674,13 +1104,26 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
   onTogglePurchased: () => void;
   onDelete: () => void;
   onSetPriority: (p: number) => void;
+  onCheckPrice: () => void;
 }) {
   const [hovered, setHovered] = React.useState(false);
+  const [priceHistory, setPriceHistory] = useState<PriceSnapshot[]>([]);
+  const [showPriceHistory, setShowPriceHistory] = useState(false);
   const isPurchased = !!item.purchased;
   const isClaimed = !!item.claimed_by;
   const isClaimedByMe = item.claimed_by === user.id;
 
-  // Determine status
+  const fetchPriceHistory = async () => {
+    try {
+      const res = await fetch(`/api/items/${item.id}/prices`, { credentials: 'include' });
+      if (res.ok) setPriceHistory(await res.json());
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (showPriceHistory) fetchPriceHistory();
+  }, [showPriceHistory]);
+
   let statusLabel = '';
   let statusColor = '';
   if (isPurchased) {
@@ -692,6 +1135,18 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
   } else if (isClaimed) {
     statusLabel = '🔐 Claimed';
     statusColor = '#fbbf24';
+  }
+
+  const previousPrice = priceHistory.length >= 2 ? priceHistory[priceHistory.length - 2].price : null;
+  const currentPrice = item.price;
+  let priceTrend = '';
+  if (previousPrice && currentPrice) {
+    const prevNum = parseFloat(previousPrice.replace(/[^0-9.]/g, ''));
+    const curNum = parseFloat(currentPrice.replace(/[^0-9.]/g, ''));
+    if (!isNaN(prevNum) && !isNaN(curNum)) {
+      if (curNum < prevNum) priceTrend = `was ${previousPrice}, now ${currentPrice} ↓`;
+      else if (curNum > prevNum) priceTrend = `was ${previousPrice}, now ${currentPrice} ↑`;
+    }
   }
 
   return (
@@ -809,7 +1264,26 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
               {statusLabel}
             </span>
           )}
+          {/* Tag chips */}
+          {item.tags?.map(tag => (
+            <span key={tag.id} style={{
+              background: `${accent}1a`,
+              color: accent,
+              padding: '0.15rem 0.5rem',
+              borderRadius: '9999px',
+              fontSize: '0.7rem',
+              fontWeight: 500,
+            }}>
+              {tag.name}
+            </span>
+          ))}
         </div>
+
+        {priceTrend && (
+          <div style={{ fontSize: '0.8rem', color: defaultTheme.success }}>
+            {priceTrend}
+          </div>
+        )}
 
         {item.notes && (
           <p style={{
@@ -834,26 +1308,36 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
               textDecoration: 'none',
               fontSize: '0.85rem',
               fontWeight: 500,
+              minHeight: '44px',
+              display: 'inline-flex',
+              alignItems: 'center',
             }}
           >
             Buy at {item.store_name || 'Store'} →
           </a>
           <span style={{ flex: 1 }} />
 
+          {/* Check price button */}
+          {!isPurchased && (
+            <button onClick={() => { setShowPriceHistory(!showPriceHistory); if (!showPriceHistory) onCheckPrice(); }} style={{ ...actionButtonStyle(defaultTheme.textDim), minHeight: '44px', minWidth: '44px' }} title="Check price">
+              💲
+            </button>
+          )}
+
           {/* Claim button: show for non-owners on personal lists, and anyone on shared lists (except their own) */}
           {!isPurchased && !isOwner && !isSharedList && !isClaimed && (
-            <button onClick={onClaim} style={actionButtonStyle(accent)}>
+            <button onClick={onClaim} style={{ ...actionButtonStyle(accent), minHeight: '44px' }}>
               🎯 Claim
             </button>
           )}
           {!isPurchased && isSharedList && !isClaimed && item.added_by !== user.id && (
-            <button onClick={onClaim} style={actionButtonStyle(accent)}>
+            <button onClick={onClaim} style={{ ...actionButtonStyle(accent), minHeight: '44px' }}>
               🎯 Claim
             </button>
           )}
           {/* Unclaim button for claimer */}
           {isClaimedByMe && !isPurchased && (
-            <button onClick={onClaim} style={actionButtonStyle('#fbbf24')}>
+            <button onClick={onClaim} style={{ ...actionButtonStyle('#fbbf24'), minHeight: '44px' }}>
               ✕ Unclaim
             </button>
           )}
@@ -864,6 +1348,7 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
               ...actionButtonStyle(defaultTheme.success),
               border: `1px solid ${isPurchased ? 'rgba(74,222,128,0.3)' : defaultTheme.glassBorder}`,
               color: isPurchased ? defaultTheme.success : defaultTheme.textDim,
+              minHeight: '44px',
             }}>
               {isPurchased ? 'Undo' : '✓ Got it'}
             </button>
@@ -872,6 +1357,8 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
             <button onClick={onDelete} style={{
               ...actionButtonStyle(defaultTheme.danger),
               opacity: 0.7,
+              minHeight: '44px',
+              minWidth: '44px',
             }}>
               ✕
             </button>
@@ -879,24 +1366,39 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
 
           {/* Priority setter for owners */}
           {(isOwner || isSharedList) && (
-            <div style={{ position: 'relative', display: 'inline-block' }}>
-              <button
-                onClick={(e) => {
-                  const next = item.priority >= 2 ? 0 : item.priority + 1;
-                  onSetPriority(next);
-                }}
-                style={{
-                  ...actionButtonStyle(defaultTheme.textDim),
-                  minWidth: '28px',
-                  padding: '0.25rem',
-                }}
-                title={item.priority === 0 ? 'Normal' : item.priority === 1 ? 'High' : 'Must Have'}
-              >
-                {item.priority === 0 ? '☆' : item.priority === 1 ? '⬆' : '🔥'}
-              </button>
-            </div>
+            <button
+              onClick={(e) => {
+                const next = item.priority >= 2 ? 0 : item.priority + 1;
+                onSetPriority(next);
+              }}
+              style={{
+                ...actionButtonStyle(defaultTheme.textDim),
+                minWidth: '44px',
+                minHeight: '44px',
+                padding: '0.25rem',
+              }}
+              title={item.priority === 0 ? 'Normal' : item.priority === 1 ? 'High' : 'Must Have'}
+            >
+              {item.priority === 0 ? '☆' : item.priority === 1 ? '⬆' : '🔥'}
+            </button>
           )}
         </div>
+
+        {showPriceHistory && (
+          <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '0.5rem' }}>
+            {priceHistory.length === 0 ? (
+              <div style={{ fontSize: '0.8rem', color: defaultTheme.textDim }}>No price history yet.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                {priceHistory.map((snap) => (
+                  <div key={snap.id} style={{ fontSize: '0.8rem', color: defaultTheme.textDim }}>
+                    {new Date(snap.scraped_at).toLocaleDateString()}: ${snap.price}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={{ fontSize: '0.7rem', color: defaultTheme.textDim, marginTop: '0.25rem' }}>
           Added by {item.user_name} · {new Date(item.created_at).toLocaleDateString()}
@@ -927,6 +1429,7 @@ const inputStyle: React.CSSProperties = {
   outline: 'none',
   width: '100%',
   boxSizing: 'border-box',
+  minHeight: '44px',
 };
 
 function actionButtonStyle(color: string): React.CSSProperties {
@@ -934,11 +1437,14 @@ function actionButtonStyle(color: string): React.CSSProperties {
     background: 'transparent',
     border: `1px solid ${color}44`,
     color,
-    padding: '0.25rem 0.6rem',
+    padding: '0.3rem 0.7rem',
     borderRadius: '0.375rem',
     cursor: 'pointer',
-    fontSize: '0.75rem',
+    fontSize: '0.8rem',
     transition: 'all 0.2s ease',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
   };
 }
 
@@ -953,6 +1459,8 @@ function getActivityEmoji(action: string): string {
     unpurchased: '🔄',
     priority_changed: '⬆️',
     deleted: '🗑️',
+    occasion_created: '📅',
+    occasion_deleted: '🗑',
   };
   return map[action] || '📌';
 }
@@ -966,6 +1474,8 @@ function getActivityVerb(action: string): string {
     unpurchased: 'unmarked as received on',
     priority_changed: 'changed priority on',
     deleted: 'removed an item from',
+    occasion_created: 'created an occasion on',
+    occasion_deleted: 'deleted an occasion on',
   };
   return map[action] || action;
 }
