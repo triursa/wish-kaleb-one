@@ -135,6 +135,14 @@ export default function App() {
   // Occasions panel
   const [showOccasions, setShowOccasions] = useState(false);
 
+  // Smart import state
+  const [showSmartImport, setShowSmartImport] = useState(false);
+  const [smartImportUrl, setSmartImportUrl] = useState('');
+  const [smartImportDetecting, setSmartImportDetecting] = useState(false);
+  const [smartImportItems, setSmartImportItems] = useState<Array<{ url: string; title: string; price: string | null; image: string | null; store: string | null; selected: boolean }>>([]);
+  const [smartImportType, setSmartImportType] = useState<string | null>(null);
+  const [smartImporting, setSmartImporting] = useState(false);
+
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth <= 640);
     handleResize();
@@ -278,6 +286,63 @@ export default function App() {
       setError('Network error');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSmartDetect = async () => {
+    if (!smartImportUrl.trim()) return;
+    setSmartImportDetecting(true);
+    setError('');
+    try {
+      const res = await fetch('/api/smart-add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ url: smartImportUrl.trim() }),
+      });
+      const data = await res.json();
+      if (data.type && data.items.length > 0) {
+        setSmartImportType(data.type);
+        setSmartImportItems(data.items.map((i: any) => ({ ...i, selected: true })));
+      } else {
+        setError(data.message || 'No wishlist detected at that URL');
+      }
+    } catch {
+      setError('Failed to detect wishlist');
+    } finally {
+      setSmartImportDetecting(false);
+    }
+  };
+
+  const handleSmartImport = async () => {
+    if (!activeListId) return;
+    const selected = smartImportItems.filter(i => i.selected);
+    if (selected.length === 0) return;
+    setSmartImporting(true);
+    try {
+      const res = await fetch('/api/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ listId: activeListId, items: selected }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setShowSmartImport(false);
+        setSmartImportUrl('');
+        setSmartImportItems([]);
+        setSmartImportType(null);
+        await fetchListItems(activeListId);
+        fetchMyClaims();
+        fetchActivity();
+      } else {
+        const data = await res.json();
+        setError(data.error || 'Import failed');
+      }
+    } catch {
+      setError('Import failed');
+    } finally {
+      setSmartImporting(false);
     }
   };
 
@@ -611,33 +676,201 @@ export default function App() {
 
             {/* Add Item Form */}
             {activeListId && (isOwnerOfActiveList || isSharedList) && (
-              <AddItemForm
-                isMobile={isMobile}
-                accent={accent}
-                manualMode={manualMode}
-                setManualMode={setManualMode}
-                urlInput={urlInput}
-                setUrlInput={setUrlInput}
-                notesInput={notesInput}
-                setNotesInput={setNotesInput}
-                manualTitle={manualTitle}
-                setManualTitle={setManualTitle}
-                manualPrice={manualPrice}
-                setManualPrice={setManualPrice}
-                manualImage={manualImage}
-                setManualImage={setManualImage}
-                manualStore={manualStore}
-                setManualStore={setManualStore}
-                selectedOccasionId={selectedOccasionId}
-                setSelectedOccasionId={setSelectedOccasionId}
-                selectedTagIds={selectedTagIds}
-                setSelectedTagIds={setSelectedTagIds}
-                occasions={occasions}
-                tags={tags}
-                submitting={submitting}
-                onSubmit={handleAdd}
-                canSubmit={formCanSubmit}
-              />
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'stretch', marginBottom: '1.5rem' }}>
+                <div style={{ flex: 1 }}>
+                  <AddItemForm
+                    isMobile={isMobile}
+                    accent={accent}
+                    manualMode={manualMode}
+                    setManualMode={setManualMode}
+                    urlInput={urlInput}
+                    setUrlInput={setUrlInput}
+                    notesInput={notesInput}
+                    setNotesInput={setNotesInput}
+                    manualTitle={manualTitle}
+                    setManualTitle={setManualTitle}
+                    manualPrice={manualPrice}
+                    setManualPrice={setManualPrice}
+                    manualImage={manualImage}
+                    setManualImage={setManualImage}
+                    manualStore={manualStore}
+                    setManualStore={setManualStore}
+                    selectedOccasionId={selectedOccasionId}
+                    setSelectedOccasionId={setSelectedOccasionId}
+                    selectedTagIds={selectedTagIds}
+                    setSelectedTagIds={setSelectedTagIds}
+                    occasions={occasions}
+                    tags={tags}
+                    submitting={submitting}
+                    onSubmit={handleAdd}
+                    canSubmit={formCanSubmit}
+                  />
+                </div>
+                <button
+                  onClick={() => setShowSmartImport(true)}
+                  style={{
+                    background: defaultTheme.glass,
+                    border: `1px solid ${defaultTheme.glassBorder}`,
+                    borderRadius: '1rem',
+                    padding: '0.65rem 1rem',
+                    color: accent,
+                    cursor: 'pointer',
+                    fontSize: '0.85rem',
+                    fontWeight: 500,
+                    backdropFilter: 'blur(20px)',
+                    whiteSpace: 'nowrap',
+                    minHeight: '44px',
+                    alignSelf: 'flex-end',
+                    fontFamily: "'Inter', sans-serif",
+                  }}
+                  title="Import from Amazon Wishlist or Etsy Favorites"
+                >
+                  📥 Bulk Import
+                </button>
+              </div>
+            )}
+
+            {/* Smart Import Modal */}
+            {showSmartImport && (
+              <div style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                zIndex: 1000, padding: '1rem',
+              }}>
+                <div style={{
+                  background: '#1a1a2e',
+                  border: `1px solid ${defaultTheme.glassBorder}`,
+                  borderRadius: '1rem',
+                  padding: '1.5rem',
+                  maxWidth: '600px',
+                  width: '100%',
+                  maxHeight: '80vh',
+                  overflow: 'auto',
+                  backdropFilter: 'blur(20px)',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h2 style={{
+                      fontFamily: 'Georgia, serif', fontSize: '1.3rem',
+                      fontWeight: 400, color: defaultTheme.text, margin: 0,
+                    }}>
+                      📥 Bulk Import
+                    </h2>
+                    <button onClick={() => { setShowSmartImport(false); setSmartImportItems([]); setSmartImportType(null); }} style={{
+                      background: 'transparent', border: 'none', color: defaultTheme.textDim,
+                      fontSize: '1.5rem', cursor: 'pointer', padding: '0.25rem',
+                    }}>✕</button>
+                  </div>
+
+                  <p style={{ color: defaultTheme.textDim, fontSize: '0.85rem', margin: '0 0 1rem' }}>
+                    Paste an Amazon Wishlist or Etsy Favorites URL to import items in bulk.
+                  </p>
+
+                  {/* URL input */}
+                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <input
+                      type="url"
+                      value={smartImportUrl}
+                      onChange={e => setSmartImportUrl(e.target.value)}
+                      placeholder="https://www.amazon.com/hz/wishlist/ls/..."
+                      style={{ ...inputStyle, flex: 1 }}
+                    />
+                    <button
+                      onClick={handleSmartDetect}
+                      disabled={smartImportDetecting}
+                      style={{
+                        background: `linear-gradient(135deg, ${accent}, ${accent}dd)`,
+                        border: 'none',
+                        borderRadius: '0.5rem',
+                        padding: '0.65rem 1.2rem',
+                        color: '#fff',
+                        fontSize: '0.9rem',
+                        fontWeight: 500,
+                        cursor: smartImportDetecting ? 'wait' : 'pointer',
+                        opacity: smartImportDetecting ? 0.6 : 1,
+                        minHeight: '44px',
+                        fontFamily: "'Inter', sans-serif",
+                      }}
+                    >
+                      {smartImportDetecting ? 'Detecting…' : 'Detect'}
+                    </button>
+                  </div>
+
+                  {/* Detected items */}
+                  {smartImportItems.length > 0 && (
+                    <>
+                      <div style={{
+                        background: `${accent}15`,
+                        border: `1px solid ${accent}33`,
+                        borderRadius: '0.5rem',
+                        padding: '0.6rem 0.85rem',
+                        marginBottom: '0.75rem',
+                        fontSize: '0.85rem',
+                        color: accent,
+                      }}>
+                        {smartImportType === 'amazon-wishlist' ? '📦' : '🧶'} Detected {smartImportItems.length} items — select which to import
+                      </div>
+
+                      <div style={{
+                        maxHeight: '300px',
+                        overflow: 'auto',
+                        marginBottom: '1rem',
+                        border: `1px solid ${defaultTheme.glassBorder}`,
+                        borderRadius: '0.5rem',
+                      }}>
+                        {smartImportItems.map((item, i) => (
+                          <label key={i} style={{
+                            display: 'flex', alignItems: 'center', gap: '0.5rem',
+                            padding: '0.6rem 0.85rem',
+                            borderBottom: i < smartImportItems.length - 1 ? `1px solid ${defaultTheme.glassBorder}` : 'none',
+                            cursor: 'pointer',
+                            color: defaultTheme.text,
+                            fontSize: '0.85rem',
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={item.selected}
+                              onChange={() => {
+                                const updated = [...smartImportItems];
+                                updated[i] = { ...updated[i], selected: !updated[i].selected };
+                                setSmartImportItems(updated);
+                              }}
+                              style={{ accentColor: accent }}
+                            />
+                            <span style={{ flex: 1 }}>{item.title}</span>
+                            {item.price && <span style={{ color: accent, fontWeight: 600 }}>${item.price}</span>}
+                            {item.store && <span style={{ color: defaultTheme.textDim, fontSize: '0.75rem' }}>{item.store}</span>}
+                          </label>
+                        ))}
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                        <span style={{ color: defaultTheme.textDim, fontSize: '0.85rem', alignSelf: 'center' }}>
+                          {smartImportItems.filter(i => i.selected).length} items selected
+                        </span>
+                        <button
+                          onClick={handleSmartImport}
+                          disabled={smartImporting || smartImportItems.filter(i => i.selected).length === 0}
+                          style={{
+                            background: `linear-gradient(135deg, ${accent}, ${accent}dd)`,
+                            border: 'none',
+                            borderRadius: '0.5rem',
+                            padding: '0.65rem 1.5rem',
+                            color: '#fff',
+                            fontSize: '0.9rem',
+                            fontWeight: 500,
+                            cursor: smartImporting ? 'wait' : 'pointer',
+                            opacity: smartImporting || smartImportItems.filter(i => i.selected).length === 0 ? 0.6 : 1,
+                            minHeight: '44px',
+                            fontFamily: "'Inter', sans-serif",
+                          }}
+                        >
+                          {smartImporting ? 'Importing…' : `Import ${smartImportItems.filter(i => i.selected).length} Items`}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
             )}
 
             {error && (
@@ -1198,7 +1431,15 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
             src={item.image_url}
             alt={item.title}
             style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', padding: '0.75rem' }}
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+            onError={(e) => {
+              const img = e.target as HTMLImageElement;
+              // If direct load fails, try the image proxy
+              if (item.image_url && !img.src.includes('/api/image-proxy')) {
+                img.src = `/api/image-proxy?url=${encodeURIComponent(item.image_url)}`;
+              } else {
+                img.style.display = 'none';
+              }
+            }}
           />
         </div>
       ) : (

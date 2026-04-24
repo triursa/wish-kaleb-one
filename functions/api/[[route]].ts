@@ -11,6 +11,7 @@ interface Env {
   GITHUB_VAULT_REPO: string;
   GITHUB_VAULT_PATH: string;
   GITHUB_VAULT_BRANCH: string;
+  CRON_SECRET: string;
 }
 
 interface UserRow {
@@ -1021,6 +1022,334 @@ async function syncToGitHub(env: Env): Promise<void> {
     await new Promise(r => setTimeout(r, 1000));
   }
 }
+
+// ─── Image Proxy ─────────────────────────────────────────────────────────────
+// Some stores block hotlinking (Referer check). This endpoint fetches the image
+// server-side and returns it, bypassing the browser Referer header.
+
+app.get('/api/image-proxy', async (c) => {
+  const url = c.req.query('url');
+  if (!url) return c.json({ error: 'url parameter required' }, 400);
+
+  // Validate it's an http(s) URL to prevent SSRF
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return c.json({ error: 'Only http(s) URLs allowed' }, 400);
+    }
+  } catch {
+    return c.json({ error: 'Invalid URL' }, 400);
+  }
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/*,*/*;q=0.8',
+        // No Referer — bypasses hotlink protection
+      },
+    });
+
+    if (!res.ok) return c.json({ error: 'Upstream fetch failed' }, 502);
+
+    const contentType = res.headers.get('content-type') || 'image/png';
+    if (!contentType.startsWith('image/') && !contentType.startsWith('application/octet-stream')) {
+      return c.json({ error: 'Not an image', contentType }, 415);
+    }
+
+    const body = await res.arrayBuffer();
+    return new Response(body, {
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=86400', // Cache 24h at edge
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
+  } catch {
+    return c.json({ error: 'Fetch failed' }, 502);
+  }
+});
+
+// ─── Price Alert Cron ────────────────────────────────────────────────────────
+// Called by Cloudflare Cron Triggers or external scheduler.
+// Re-scrapes all active (unpurchased, non-deleted) items and saves price snapshots.
+// Returns summary of price changes for notification.
+
+app.post('/api/cron/price-check', async (c) => {
+  // Auth via CRON_SECRET — not Cloudflare Access
+  const cronSecret = c.req.header('X-Cron-Secret');
+  if (cronSecret !== c.env.CRON_SECRET) {
+    return c.json({ error: 'Invalid cron secret' }, 401);
+  }
+
+  await initDB(c.env.DB);
+
+  const items = await c.env.DB.prepare(`
+    SELECT i.*, l.name as list_name, l.slug as list_slug, l.emoji as list_emoji,
+           u.name as user_name, u.email as user_email
+    FROM items i
+    JOIN lists l ON i.list_id = l.id
+    JOIN users u ON i.added_by = u.id
+    WHERE i.deleted_at IS NULL AND i.purchased = 0 AND i.url IS NOT NULL
+  `).all();
+
+  const changes: Array<{
+    itemId: string;
+    title: string;
+    oldPrice: string | null;
+    newPrice: string | null;
+    listName: string;
+    url: string;
+  }> = [];
+
+  for (const item of items.results as any[]) {
+    try {
+      const meta = await scrapeUrl(item.url);
+      if (meta.price && item.price && meta.price !== item.price) {
+        const oldPrice = parseFloat(item.price);
+        const newPrice = parseFloat(meta.price);
+
+        // Only report if price dropped (or changed significantly)
+        if (!isNaN(oldPrice) && !isNaN(newPrice) && Math.abs(newPrice - oldPrice) > 0.01) {
+          // Save snapshot
+          await c.env.DB.prepare(
+            'INSERT INTO price_snapshots (id, item_id, price, scraped_at) VALUES (?, ?, ?, datetime(\'now\'))'
+          ).bind(crypto.randomUUID(), item.id, meta.price).run();
+
+          // Update item price
+          await c.env.DB.prepare('UPDATE items SET price = ? WHERE id = ?').bind(meta.price, item.id).run();
+
+          changes.push({
+            itemId: item.id,
+            title: item.title,
+            oldPrice: item.price,
+            newPrice: meta.price,
+            listName: `${item.list_emoji} ${item.list_name}`,
+            url: item.url,
+          });
+        }
+      }
+
+      // Space out scrapes to be polite
+      await new Promise(r => setTimeout(r, 2000));
+    } catch {
+      // Skip failed scrapes silently
+    }
+  }
+
+  // Sync changes to vault
+  if (changes.length > 0) {
+    syncToGitHub(c.env).catch(() => {});
+  }
+
+  return c.json({
+    checked: items.results.length,
+    changes: changes.length,
+    details: changes,
+  });
+});
+
+// ─── Smart Add — Wishlist URL Detection & Bulk Import ─────────────────────────
+
+interface BulkItem {
+  url: string;
+  title: string;
+  price: string | null;
+  image: string | null;
+  store: string | null;
+}
+
+async function detectWishlistType(url: string): Promise<{ type: string | null; items: BulkItem[] }> {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Amazon Wishlist detection
+    if (hostname.includes('amazon.com') && (parsed.pathname.includes('/wishlist') || parsed.pathname.includes('/registry'))) {
+      return await parseAmazonWishlist(url);
+    }
+
+    // Etsy Favorites/Collections detection
+    if (hostname.includes('etsy.com') && (parsed.pathname.includes('/favorites') || parsed.pathname.includes('/collection'))) {
+      return await parseGenericWishlist(url, 'etsy');
+    }
+
+    return { type: null, items: [] };
+  } catch {
+    return { type: null, items: [] };
+  }
+}
+
+async function parseAmazonWishlist(url: string): Promise<{ type: string; items: BulkItem[] }> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    const html = await res.text();
+
+    const items: BulkItem[] = [];
+
+    // Amazon wishlist items are in elements with data-asin or g-item-id
+    // Try to find item containers
+    const itemRegex = /data-asin="([A-Z0-9]+)"/gi;
+    const asins: string[] = [];
+    let m;
+    while ((m = itemRegex.exec(html)) !== null) {
+      if (!asins.includes(m[1])) asins.push(m[1]);
+    }
+
+    // Also try to find item titles in the HTML
+    const titleRegex = /id="itemName_[^"]*"[^>]*>([^<]+)</gi;
+    const priceRegex = /id="itemPrice_[^"]*"[^>]*>[\s\S]*?\$([0-9,.]+)/gi;
+
+    const titles: string[] = [];
+    const prices: string[] = [];
+
+    while ((m = titleRegex.exec(html)) !== null) titles.push(m[1].trim());
+    while ((m = priceRegex.exec(html)) !== null) prices.push(m[1].replace(',', ''));
+
+    for (let i = 0; i < asins.length; i++) {
+      items.push({
+        url: `https://www.amazon.com/dp/${asins[i]}`,
+        title: titles[i] || `Amazon Item ${asins[i]}`,
+        price: prices[i] || null,
+        image: null,
+        store: 'Amazon',
+      });
+    }
+
+    return { type: 'amazon-wishlist', items };
+  } catch {
+    return { type: 'amazon-wishlist', items: [] };
+  }
+}
+
+async function parseGenericWishlist(url: string, platform: string): Promise<{ type: string; items: BulkItem[] }> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    const html = await res.text();
+
+    const items: BulkItem[] = [];
+
+    // Look for og:url or link elements that point to individual items
+    const linkRegex = /href="(https:\/\/www\.etsy\.com\/listing\/[^"?]+)/gi;
+    const urls: string[] = [];
+    let m;
+    while ((m = linkRegex.exec(html)) !== null) {
+      if (!urls.includes(m[1])) urls.push(m[1]);
+    }
+
+    for (const itemUrl of urls.slice(0, 20)) { // Cap at 20 to avoid abuse
+      items.push({
+        url: itemUrl,
+        title: 'Etsy Item (details on import)',
+        price: null,
+        image: null,
+        store: 'Etsy',
+      });
+    }
+
+    return { type: `${platform}-favorites`, items };
+  } catch {
+    return { type: `${platform}-favorites`, items: [] };
+  }
+}
+
+// POST /api/smart-add — detect wishlist type, return items for preview
+app.post('/api/smart-add', authMiddleware, async (c) => {
+  const body = await c.req.json();
+  const { url } = body;
+  if (!url) return c.json({ error: 'URL required' }, 400);
+
+  const detection = await detectWishlistType(url);
+
+  if (!detection.type) {
+    return c.json({
+      type: null,
+      items: [],
+      message: 'Not a recognized wishlist URL. Try pasting an Amazon wishlist or Etsy favorites page.',
+    });
+  }
+
+  // For detected wishlist URLs, enrich items by scraping each one
+  if (detection.items.length > 0 && detection.items.length <= 20) {
+    const enriched: BulkItem[] = [];
+    for (const item of detection.items) {
+      if (!item.title || item.title.includes('(details on import)')) {
+        const meta = await scrapeUrl(item.url);
+        enriched.push({
+          ...item,
+          title: meta.title || item.title,
+          price: meta.price || item.price,
+          image: meta.image || item.image,
+          store: meta.store || item.store,
+        });
+        // Rate limit scrapes
+        await new Promise(r => setTimeout(r, 1500));
+      } else {
+        enriched.push(item);
+      }
+    }
+    detection.items = enriched;
+  }
+
+  return c.json(detection);
+});
+
+// POST /api/bulk-import — import detected items into a list
+app.post('/api/bulk-import', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json();
+  const { listId, items: bulkItems } = body as { listId: string; items: BulkItem[] };
+
+  if (!listId || !bulkItems || !Array.isArray(bulkItems) || bulkItems.length === 0) {
+    return c.json({ error: 'listId and items array required' }, 400);
+  }
+
+  await initDB(c.env.DB);
+
+  const list = await c.env.DB.prepare('SELECT * FROM lists WHERE id = ?').bind(listId).first<ListRow>();
+  if (!list) return c.json({ error: 'List not found' }, 404);
+
+  const isOwner = list.owner_id === user.id;
+  const isShared = list.owner_id === null;
+  if (!isOwner && !isShared) {
+    return c.json({ error: 'Only the list owner can add items' }, 403);
+  }
+
+  // Cap at 50 items per bulk import
+  const toImport = bulkItems.slice(0, 50);
+  const imported: string[] = [];
+
+  for (const item of toImport) {
+    const id = crypto.randomUUID();
+    await c.env.DB.prepare(`
+      INSERT INTO items (id, list_id, url, title, price, image_url, store_name, added_by, priority)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `).bind(id, listId, item.url, item.title || item.url, item.price || null, item.image || null, item.store || null, user.id).run();
+
+    // Save initial price snapshot
+    if (item.price) {
+      await c.env.DB.prepare(
+        'INSERT INTO price_snapshots (id, item_id, price, scraped_at) VALUES (?, ?, ?, datetime(\'now\'))'
+      ).bind(crypto.randomUUID(), id, item.price).run();
+    }
+
+    await logActivity(c.env.DB, listId, 'added', user.id, id);
+    imported.push(id);
+  }
+
+  // Fire-and-forget sync
+  syncToGitHub(c.env).catch(() => {});
+
+  return c.json({ imported: imported.length, ids: imported }, 201);
+});
 
 // ─── Export for Cloudflare Pages Functions ─────────────────────────────────────
 
