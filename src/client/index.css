@@ -1,0 +1,27 @@
+/* M3 Obsidian Design System for wish.kaleb.one */
+:root {
+  /* M3 Obsidian base tokens from theme-obsidian.css */
+
+  /* Per-domain accent override — default purple, overridden per-list */
+  --md-sys-color-primary: #c084fc;
+
+  /* Wish-specific tokens mapping to M3 */
+  --bg: var(--md-sys-color-surface);
+  --bg-deep: #0a0a1a;
+  --glass: var(--md-sys-color-surface-container);
+  --glass-hover: var(--md-sys-color-surface-container-high);
+  --glass-border: var(--md-sys-color-outline-variant);
+  --text: var(--md-sys-color-on-surface);
+  --text-dim: var(--md-sys-color-on-surface-variant);
+  --danger: #f87171;
+  --success: #4ade80;
+  --warning: #fbbf24;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }

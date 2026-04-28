@@ -85,15 +85,15 @@ interface ActivityItem {
 // ─── Theme ──────────────────────────────────────────────────────────────────
 
 const defaultTheme = {
-  bg: '#0a0a1a',
-  glass: 'rgba(255,255,255,0.05)',
-  glassHover: 'rgba(255,255,255,0.08)',
-  glassBorder: 'rgba(255,255,255,0.1)',
-  text: '#e2e8f0',
-  textDim: '#94a3b8',
-  danger: '#f87171',
-  success: '#4ade80',
-  warning: '#fbbf24',
+  bg: 'var(--bg-deep)',
+  glass: 'var(--glass)',
+  glassHover: 'var(--glass-hover)',
+  glassBorder: 'var(--glass-border)',
+  text: 'var(--text)',
+  textDim: 'var(--text-dim)',
+  danger: 'var(--danger)',
+  success: 'var(--success)',
+  warning: 'var(--warning)',
 };
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -509,8 +509,7 @@ export default function App() {
             borderRadius: '0.75rem',
             color: defaultTheme.text,
             fontSize: '1rem',
-            cursor: 'pointer',
-            backdropFilter: 'blur(20px)',
+            cursor: 'pointer'
           }}>
             Retry
           </button>
@@ -601,8 +600,7 @@ export default function App() {
                     color: activeListId === list.id ? list.accent : defaultTheme.textDim,
                     cursor: 'pointer',
                     fontSize: '0.95rem',
-                    fontWeight: activeListId === list.id ? 600 : 400,
-                    backdropFilter: 'blur(20px)',
+                    fontWeight: activeListId === list.id ? 600 : 400
                     transition: 'all 0.2s ease',
                     fontFamily: "'Inter', sans-serif",
                     minHeight: '44px',
@@ -716,8 +714,7 @@ export default function App() {
                     color: accent,
                     cursor: 'pointer',
                     fontSize: '0.85rem',
-                    fontWeight: 500,
-                    backdropFilter: 'blur(20px)',
+                    fontWeight: 500
                     whiteSpace: 'nowrap',
                     minHeight: '44px',
                     alignSelf: 'flex-end',
@@ -745,8 +742,7 @@ export default function App() {
                   maxWidth: '600px',
                   width: '100%',
                   maxHeight: '80vh',
-                  overflow: 'auto',
-                  backdropFilter: 'blur(20px)',
+                  overflow: 'auto'
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                     <h2 style={{
@@ -980,8 +976,7 @@ export default function App() {
             <div style={{
               background: defaultTheme.glass,
               border: `1px solid ${defaultTheme.glassBorder}`,
-              borderRadius: '1rem',
-              backdropFilter: 'blur(20px)',
+              borderRadius: '1rem'
               overflow: 'hidden',
             }}>
               {activity.length === 0 ? (
@@ -1035,8 +1030,7 @@ function tagChipStyle(active: boolean, accent: string): React.CSSProperties {
     color: active ? accent : defaultTheme.textDim,
     cursor: 'pointer',
     fontSize: '0.8rem',
-    fontWeight: active ? 600 : 400,
-    backdropFilter: 'blur(20px)',
+    fontWeight: active ? 600 : 400
     transition: 'all 0.2s ease',
     fontFamily: "'Inter', sans-serif",
     minHeight: '32px',
@@ -1120,8 +1114,7 @@ function OccasionsPanel({ occasions, show, onToggle, accent, onAdd, onDelete }: 
           padding: '0.55rem 0.9rem',
           color: defaultTheme.textDim,
           cursor: 'pointer',
-          fontSize: '0.9rem',
-          backdropFilter: 'blur(20px)',
+          fontSize: '0.9rem'
           marginBottom: '1rem',
           minHeight: '44px',
         }}
@@ -1137,8 +1130,7 @@ function OccasionsPanel({ occasions, show, onToggle, accent, onAdd, onDelete }: 
       border: `1px solid ${defaultTheme.glassBorder}`,
       borderRadius: '1rem',
       padding: '1rem',
-      marginBottom: '1rem',
-      backdropFilter: 'blur(20px)',
+      marginBottom: '1rem'
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
         <span style={{ color: defaultTheme.text, fontWeight: 600, fontSize: '0.95rem' }}>📅 Occasions</span>
@@ -1153,7 +1145,7 @@ function OccasionsPanel({ occasions, show, onToggle, accent, onAdd, onDelete }: 
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            background: 'rgba(255,255,255,0.03)',
+            background: 'var(--glass)',
             borderRadius: '0.5rem',
             padding: '0.5rem 0.75rem',
           }}>
@@ -1241,7 +1233,7 @@ function AddItemForm({ isMobile, accent, manualMode, setManualMode, urlInput, se
         </div>
 
         {manualMode && (
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', padding: '0.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '0.75rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', padding: '0.5rem', background: 'var(--glass)', borderRadius: '0.75rem' }}>
             <input type="text" value={manualTitle} onChange={e => setManualTitle(e.target.value)} placeholder="Title *" required={manualMode} style={{ ...inputStyle, flex: '2 1 200px' }} />
             <input type="text" value={manualPrice} onChange={e => setManualPrice(e.target.value)} placeholder="Price" style={{ ...inputStyle, flex: '1 1 100px' }} />
             <input type="url" value={manualImage} onChange={e => setManualImage(e.target.value)} placeholder="Image URL" style={{ ...inputStyle, flex: '2 1 200px' }} />
@@ -1307,8 +1299,7 @@ const addItemPanelStyle: React.CSSProperties = {
   border: `1px solid ${defaultTheme.glassBorder}`,
   borderRadius: '1rem',
   padding: '1.25rem',
-  marginBottom: '1.5rem',
-  backdropFilter: 'blur(20px)',
+  marginBottom: '1.5rem'
 };
 
 const addItemSheetStyle: React.CSSProperties = {
@@ -1316,11 +1307,10 @@ const addItemSheetStyle: React.CSSProperties = {
   bottom: 0,
   left: 0,
   right: 0,
-  background: 'rgba(10,10,26,0.95)',
+  background: 'var(--bg-deep)',
   borderTop: `1px solid ${defaultTheme.glassBorder}`,
   borderRadius: '1rem 1rem 0 0',
-  padding: '1rem',
-  backdropFilter: 'blur(20px)',
+  padding: '1rem'
   zIndex: 50,
   boxShadow: '0 -8px 32px rgba(0,0,0,0.5)',
 };
@@ -1390,8 +1380,7 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
         background: defaultTheme.glass,
         border: `1px solid ${defaultTheme.glassBorder}`,
         borderRadius: '1rem',
-        overflow: 'hidden',
-        backdropFilter: 'blur(20px)',
+        overflow: 'hidden'
         transition: 'all 0.25s ease',
         transform: hovered ? 'translateY(-4px)' : 'none',
         boxShadow: hovered ? `0 8px 32px ${accent}33` : '0 2px 8px rgba(0,0,0,0.3)',
@@ -1421,7 +1410,7 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
         <div style={{
           width: '100%',
           height: '200px',
-          background: 'rgba(255,255,255,0.03)',
+          background: 'var(--glass)',
           overflow: 'hidden',
           display: 'flex',
           alignItems: 'center',
@@ -1485,7 +1474,7 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
           )}
           {item.store_name && (
             <span style={{
-              background: 'rgba(255,255,255,0.07)',
+              background: 'var(--glass)',
               padding: '0.2rem 0.6rem',
               borderRadius: '0.375rem',
               fontSize: '0.75rem',
@@ -1626,7 +1615,7 @@ function ItemCard({ item, user, isOwner, isSharedList, accent, onClaim, onToggle
         </div>
 
         {showPriceHistory && (
-          <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '0.5rem' }}>
+          <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: 'var(--glass)', borderRadius: '0.5rem' }}>
             {priceHistory.length === 0 ? (
               <div style={{ fontSize: '0.8rem', color: defaultTheme.textDim }}>No price history yet.</div>
             ) : (
@@ -1661,7 +1650,7 @@ const globalStyles: React.CSSProperties = {
 };
 
 const inputStyle: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.05)',
+  background: '' + 'var(--glass)' + '',
   border: `1px solid ${defaultTheme.glassBorder}`,
   borderRadius: '0.5rem',
   padding: '0.65rem 0.85rem',
